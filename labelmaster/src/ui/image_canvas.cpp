@@ -1,6 +1,9 @@
 #include "image_canvas.hpp"
 #include "controller/settings.hpp"
 
+#include "info_dialog.h"
+#include "mainwindow.hpp"
+#include <QDebug>
 #include <QFile>
 #include <QInputDialog>
 #include <QJsonArray>
@@ -17,6 +20,13 @@
 #include <QtMath>
 #include <algorithm>
 #include <array>
+#include <qdebug.h>
+#include <qglobal.h>
+#include <qinputdialog.h>
+#include <qlist.h>
+#include <qnamespace.h>
+#include <qsize.h>
+#include <qtmetamacros.h>
 
 // ---------- JSON 工具 ----------
 static QJsonArray toJsonPt(const QPointF& p) { return QJsonArray{p.x(), p.y()}; }
@@ -218,6 +228,15 @@ bool ImageCanvas::setSelectedClass(const QString& cls) {
     update();
     return true;
 }
+bool ImageCanvas::setSelectedInfo(const QString& cls, const QString& color) {
+    if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size())
+        return false;
+    dets_[selectedIndex_].color = color.isEmpty() ? "Gray" : color;
+    dets_[selectedIndex_].cls   = cls.isEmpty() ? QStringLiteral("unknown") : cls;
+    emit detectionUpdated(selectedIndex_, dets_[selectedIndex_]);
+    update();
+    return true;
+}
 
 /* ===== 导入/导出 ===== */
 
@@ -235,8 +254,8 @@ void ImageCanvas::paintEvent(QPaintEvent*) {
     drawDetections(p);
     drawRoi(p);
     drawSvg(p, dets_);
-    drawDragRect(p); // <<< 新增：拖框时的虚线矩形
-    drawCrosshair(p);
+    drawDragRect(p);                      // <<< 新增：拖框时的虚线矩形
+    drawCrosshair(p);                     // 十字准心
 }
 
 void ImageCanvas::drawDragRect(QPainter& p) const {
@@ -258,26 +277,32 @@ void ImageCanvas::drawDragRect(QPainter& p) const {
 }
 
 void ImageCanvas::drawDetections(QPainter& p) const {
-    if (dets_.isEmpty()) return;
+    if (dets_.isEmpty())
+        return;
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
     p.setClipRect(imageRectOnWidget());
 
-    auto colorOf = [](const QString& c)->QColor {
-        if (c.isEmpty()) return QColor(0,200,255);
+    auto colorOf = [](const QString& c) -> QColor {
+        if (c.isEmpty())
+            return QColor(0, 200, 255);
         const QChar C = c.at(0).toUpper();
-        if (C=='R') return QColor(255, 70,  70);   // 红
-        if (C=='B') return QColor( 61,165,255);   // 蓝
-        if (C=='G') return QColor(170,170,180);   // 灰
-        if (C=='P') return QColor (255,192,203);   //紫
-        return QColor(0,200,255);
+        if (C == 'R')
+            return {255, 70, 70};         // 红
+        if (C == 'B')
+            return QColor(61, 165, 255);  // 蓝
+        if (C == 'G')
+            return QColor(170, 170, 180); // 灰
+        if (C == 'P')
+            return QColor(255, 192, 203); // 紫
+        return QColor(0, 200, 255);
     };
 
     for (int i = 0; i < dets_.size(); ++i) {
         const auto& d = dets_[i];
         QPolygonF poly;
-        poly << imageToWidget(d.p0) << imageToWidget(d.p1)
-             << imageToWidget(d.p2) << imageToWidget(d.p3);
+        poly << imageToWidget(d.p0) << imageToWidget(d.p1) << imageToWidget(d.p2)
+             << imageToWidget(d.p3);
 
         const bool isSel   = (i == selectedIndex_);
         const bool isHover = (i == hoverIndex_);
@@ -286,15 +311,14 @@ void ImageCanvas::drawDetections(QPainter& p) const {
         // 叠加填充（选中/悬停）
         if (isSel || isHover) {
             p.setPen(Qt::NoPen);
-            QColor fill = base; fill.setAlpha(isSel ? 60 : 45);
+            QColor fill = base;
+            fill.setAlpha(isSel ? 60 : 45);
             p.setBrush(fill);
             p.drawPolygon(poly);
         }
 
         // 轮廓
-        QPen pen = isSel ? QPen(base, 3)
-                         : isHover ? QPen(base.lighter(125), 3)
-                                   : QPen(base, 2);
+        QPen pen = isSel ? QPen(base, 3) : isHover ? QPen(base.lighter(125), 3) : QPen(base, 2);
         pen.setJoinStyle(Qt::MiterJoin);
         pen.setCapStyle(Qt::SquareCap);
         p.setPen(pen);
@@ -302,22 +326,27 @@ void ImageCanvas::drawDetections(QPainter& p) const {
         p.drawPolygon(poly);
 
         // 文本（描边 + 主色）
-        const QPointF tl = poly.boundingRect().topLeft();
+        const QPointF tl   = poly.boundingRect().topLeft();
         const QString text = QString("%1%2").arg(d.color).arg(d.cls);
-        QFont f = p.font(); f.setPointSizeF(f.pointSizeF() + 1);
+        QFont f            = p.font();
+        f.setPointSizeF(f.pointSizeF() + 1);
         p.setFont(f);
-        p.setPen(QPen(Qt::black, 4));                  // 外描边
+        p.setPen(QPen(Qt::black, 4));         // 外描边
         p.drawText(tl + QPointF(2, -2), text);
-        p.setPen(QPen(base.lighter(120), 1));          // 主色文字
+        p.setPen(QPen(base.lighter(120), 1)); // 主色文字
         p.drawText(tl + QPointF(2, -2), text);
 
         // 选中时角点
         if (isSel) {
             p.setPen(Qt::NoPen);
             for (int k = 0; k < 4; ++k) {
-                const QPointF w = imageToWidget(k==0?d.p0 : k==1?d.p1 : k==2?d.p2 : d.p3);
+                const QPointF w = imageToWidget(
+                    k == 0   ? d.p0
+                    : k == 1 ? d.p1
+                    : k == 2 ? d.p2
+                             : d.p3);
                 const bool hot = (k == hoverHandle_ || k == dragHandle_);
-                QColor c = hot ? base.lighter(120) : base;
+                QColor c       = hot ? base.lighter(120) : base;
                 p.setBrush(c);
                 p.drawEllipse(w, kHandleRadius_, kHandleRadius_);
             }
@@ -450,13 +479,16 @@ void ImageCanvas::mouseReleaseEvent(QMouseEvent* e) {
                 const QRect r = clampRectToImage(dragRectImg_.normalized());
                 if (r.width() >= 2 && r.height() >= 2) {
                     Armor a;
-                    a.cls = currentClass_.isEmpty() ? QStringLiteral("unknown") : currentClass_;
                     // TL, BL, BR, TR  (CCW)
                     a.p0 = QPointF(r.left(), r.top());
                     a.p1 = QPointF(r.left(), r.bottom());
                     a.p2 = QPointF(r.right(), r.bottom());
                     a.p3 = QPointF(r.right(), r.top());
-
+                    promptEditSelectedInfo(true);
+                    a.cls   = currentClass_.isEmpty() ? QStringLiteral("unknown") : currentClass_;
+                    a.color = currentColor_.isEmpty() ? QStringLiteral("G") : currentColor_;
+                    currentClass_ = "";
+                    currentColor_ = "";
                     dets_.append(a);
                     emit annotationCommitted(a);
                     emit detectionUpdated(dets_.size() - 1, a);
@@ -538,14 +570,14 @@ void ImageCanvas::mouseMoveEvent(QMouseEvent* e) {
 
     update(); // 始终刷新（十字线/轻微移动也更新）
 }
-
+// 编辑颜色和类别
 void ImageCanvas::mouseDoubleClickEvent(QMouseEvent* e) {
     if (e->button() != Qt::LeftButton)
         return;
     const int hit = hitDetectionStrict(e->pos());
     if (hit >= 0) {
         setSelectedIndex(hit);
-        promptEditSelectedClass();
+        promptEditSelectedInfo();
     }
 }
 
@@ -556,7 +588,7 @@ void ImageCanvas::keyPressEvent(QKeyEvent* e) {
     }
 
     if (e->key() == Qt::Key_F2 || e->key() == Qt::Key_C) {
-        promptEditSelectedClass();
+        promptEditSelectedInfo();
         e->accept();
         return;
     }
@@ -702,15 +734,25 @@ void ImageCanvas::placeFixedRoiAt(const QPoint& wpos) {
 }
 
 /* ===== UI 帮助 ===== */
-void ImageCanvas::promptEditSelectedClass() {
-    if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size())
-        return;
-    const QString oldCls = dets_[selectedIndex_].cls;
-    bool ok              = false;
-    const QString cls    = QInputDialog::getText(
-        this, tr("Edit Class"), tr("Class label:"), QLineEdit::Normal, oldCls, &ok);
-    if (ok)
-        setSelectedClass(cls.trimmed());
+void ImageCanvas::promptEditSelectedInfo(bool isCurrent) {
+    if (!isCurrent) {
+        if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size())
+            return;
+    }
+    // const QString oldCls = dets_[selectedIndex_].cls;
+    // bool ok              = false;
+    // const QString cls    = QInputDialog::getText(
+    //     this, tr("Edit Class"), tr("Class label:"), QLineEdit::Normal, oldCls, &ok);
+    // if (ok)
+    //     setSelectedClass(cls.trimmed());
+    ui::InfoDialog dialog = ui::InfoDialog(this);
+    QObject::connect(&dialog, &ui::InfoDialog::dataChanged, this, &ImageCanvas::updateInfo);
+    if (isCurrent) {
+        dialog.updateInfo(true);
+    } else {
+        dialog.updateInfo(false, dets_[selectedIndex_].cls, dets_[selectedIndex_].color);
+    }
+    dialog.exec();
 }
 
 void ImageCanvas::setupSvg() {
@@ -739,7 +781,7 @@ static inline void splitClass(const QString& cls, QString& color, QString& type)
         type.clear();
         return;
     }
-    color = s.left(1).toUpper(); // B / R / G / 
+    color = s.left(1).toUpper(); // B / R / G /
     type  = s.mid(1);            // "1","2","Bs","Bb",...
 }
 
@@ -830,4 +872,14 @@ void ImageCanvas::drawSvg(QPainter& p, const QVector<Armor>& armors) const {
 void ImageCanvas::requestSave() {
     qDebug() << "requestSave called";
     emit annotationsPublished(dets_);
+}
+void ImageCanvas::updateInfo(
+    const QString& EditedClass, const QString& Color, bool isCurrent = false) {
+    if (isCurrent) {
+        currentClass_ = EditedClass;
+        currentColor_ = Color;
+    } else {
+        dets_[selectedIndex()].color = Color;
+        setSelectedClass(EditedClass.trimmed());
+    }
 }

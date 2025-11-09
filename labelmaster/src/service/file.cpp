@@ -2,6 +2,7 @@
 // File: service/file.cpp
 // ===============================
 #include "service/file.hpp"
+#include "types.hpp"
 
 #include <QDir>
 #include <QFile>
@@ -13,6 +14,8 @@
 #include <QQueue>
 #include <QSettings>
 #include <QSortFilterProxyModel>
+#include <qdebug.h>
+#include <qglobal.h>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 # include <QStringConverter> // Qt6: QTextStream::setEncoding
 #endif
@@ -151,16 +154,8 @@ FileService::FileService(QObject* parent)
     proxy_->setRecursiveFilteringEnabled(true);
     proxy_->setDynamicSortFilter(true);
 
-    // 目录加载完成后再尝试选第一张
     connect(
-        fsModel_, &QFileSystemModel::directoryLoaded, this,
-        [this](const QString& path) {
-            if (pendingDir_.isEmpty())
-                return;
-            if (path == pendingDir_ || path.startsWith(pendingDir_ + '/')) {
-                tryOpenFirstAfterLoaded(pendingDir_);
-            }
-        },
+        fsModel_, &QFileSystemModel::directoryLoaded, this, &FileService::selectFirst,
         Qt::UniqueConnection);
 
     // proxy 重置时清空索引与当前路径，避免悬空
@@ -186,7 +181,14 @@ void FileService::openFolderDialog() {
         return;
     openDir(dir);
 }
-
+// 目录加载完成后再尝试选第一张
+void FileService::selectFirst(const QString& path) {
+    if (pendingDir_.isEmpty())
+        return;
+    if (path == pendingDir_ || path.startsWith(pendingDir_ + '/')) {
+        tryOpenFirstAfterLoaded(pendingDir_);
+    }
+}
 // BFS 找第一张图片（跨多层）
 QModelIndex FileService::findFirstImageUnder(const QModelIndex& root) const {
     if (!root.isValid())
@@ -636,6 +638,7 @@ void FileService::saveLabels(const QVector<Armor>& armors) {
     }
 
     const QString lblPath = labelFileForImage(imgPath);
+
     if (writeLabelFile(lblPath, armors, sz)) {
         emit status(tr("已保存标注：%1").arg(QFileInfo(lblPath).fileName()), 900);
         LOGI(QString("保存标注：%1").arg(lblPath));

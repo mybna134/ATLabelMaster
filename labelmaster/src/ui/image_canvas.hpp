@@ -6,6 +6,7 @@
 #include <QRect>
 #include <QString>
 #include <QVector>
+#include <qobject.h>
 
 class QPainter;
 class QKeyEvent;
@@ -52,9 +53,12 @@ public slots:
     // 类别与选中
     void setCurrentClass(const QString& cls) { currentClass_ = cls; } // 新框默认
     QString currentClass() const { return currentClass_; }
+    bool setSelectedInfo(const QString& cls, const QString& color);   // 改“选中框”的 cls 和 color
     bool setSelectedClass(const QString& cls);                        // 改“选中框”的 cls
     bool setSelectedIndex(int idx);                                   // -1 取消选中
     int selectedIndex() const { return selectedIndex_; }
+    // 更新颜色和类型
+    void updateInfo(const QString& EditedClass, const QString& Color, bool isCurrent);
 signals:
     // ROI
     void roiChanged(const QRect& roiImg);
@@ -92,9 +96,8 @@ private:
     int hitHandleOnSelected(const QPoint& wpos) const; // 命中当前“选中目标”的角点
     int hitDetectionStrict(const QPoint& wpos) const;  // 严格在框内才算命中
     bool pointInsidePolyW(const QPolygonF& polyW, const QPointF& w) const;
-
-    void promptEditSelectedClass();
-
+    // 编辑颜色和类别
+    void promptEditSelectedInfo(bool isCurrent = false);
     void updateFitRect();
     QRectF imageRectOnWidget() const;
     QPointF widgetToImage(const QPointF& p) const;
@@ -154,6 +157,7 @@ private:
     int hoverHandle_ = -1;      // 悬停角点（仅对 selected 生效）
 
     QString currentClass_;
+    QString currentColor_;
     QHash<QString, QSvgRenderer*> svgCache_;
 
     // 参数

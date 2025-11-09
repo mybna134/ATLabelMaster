@@ -52,6 +52,8 @@ signals:
     void labelsLoaded(const QVector<Armor>& armors);
 
 private:
+      // 目录加载完成后再尝试选第一张
+    void selectFirst(const QString& path);
     bool openDir(const QString& dir);
     bool openFileAt(const QModelIndex& proxyIndex);
     void tryOpenFirstAfterLoaded(const QString& dir);

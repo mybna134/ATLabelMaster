@@ -4,10 +4,14 @@
 #include "service/file.hpp"
 #include "ui/image_canvas.hpp"
 #include "ui/mainwindow.hpp"
+#include "ui/info_dialog.h"
 #include <QApplication>
 #include <QFile>
 #include <pthread.h>
 #include <qglobal.h>
+#include <qobject.h>
+#include <qtmetamacros.h>
+
 
 #define ASSETS_PATH "/home/developer/ws/assets"
 
@@ -61,8 +65,7 @@ int main(int argc, char* argv[]) {
         w.ui()->label, &ImageCanvas::annotationsPublished, &files, &FileService::saveLabels);
     files.exposeModel();
     w.enableDragDrop(true);
-    w.show();
-
+        w.show();
     LOGI("App started");
     return app.exec();
 }

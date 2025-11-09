@@ -1,5 +1,6 @@
 #include "smart_detector.hpp"
 #include "controller/settings.hpp"
+#include "types.hpp"
 #include "util/bridge.hpp"
 
 #include <QDebug>
