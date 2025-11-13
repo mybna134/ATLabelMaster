@@ -14,5 +14,7 @@ struct Armor {
 };
 
 
+
+
 Q_DECLARE_METATYPE(Armor)
 Q_DECLARE_METATYPE(QVector<Armor>)

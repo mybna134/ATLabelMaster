@@ -16,6 +16,8 @@
 #include <QStringListModel>
 #include <QTreeView>
 #include <QUrl>
+#include <qaction.h>
+#include <qmenu.h>
 
 #include "ui/image_canvas.hpp"
 
@@ -305,6 +307,7 @@ void MainWindow::setupActions() {
     connect(ui_->actionDelete, &QAction::triggered, this, &MainWindow::sigDeleteRequested);
     connect(ui_->actionSmart, &QAction::triggered, this, &MainWindow::sigSmartAnnotateRequested);
     connect(ui_->actionSettings, &QAction::triggered, this, &MainWindow::sigSettingsRequested);
+    connect(ui_->menuImport, &QMenu::triggered, this, &MainWindow::sigImportFolderRequested);
 }
 
 void MainWindow::wireButtonsToActions() {

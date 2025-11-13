@@ -6,7 +6,9 @@
 #include <QRect>
 #include <QString>
 #include <QVector>
+#include <qimage.h>
 #include <qobject.h>
+#include <qvariant.h>
 
 class QPainter;
 class QKeyEvent;
@@ -26,7 +28,6 @@ public:
     void setImage(const QImage& img);
     const QImage& currentImage() const { return img_; }
     QString currentImagePath() const { return imgPath_; }
-
     void setModelInputSize(const QSize& s);
     void setRoiMode(RoiMode m);
     RoiMode roiMode() const { return roiMode_; }
@@ -59,6 +60,7 @@ public slots:
     int selectedIndex() const { return selectedIndex_; }
     // 更新颜色和类型
     void updateInfo(const QString& EditedClass, const QString& Color, bool isCurrent);
+    void histEqualize();
 signals:
     // ROI
     void roiChanged(const QRect& roiImg);
@@ -111,17 +113,21 @@ private:
     void drawDetections(QPainter& p) const; // 高亮选中/悬停 + 选中显示角点
     void drawDragRect(QPainter& p) const;   // 拖框预览
     void drawSvg(QPainter& p, const QVector<Armor>& armors) const;
+    // 绘制Mask
+    void drawMask(const QRect& recgt);
 
     // ROI 交互
     void beginFreeRoi(const QPoint& wpos);
     void updateFreeRoi(const QPoint& wpos);
     void endFreeRoi();
     void placeFixedRoiAt(const QPoint& wpos);
-
     void setupSvg();
+    // 直方图均衡化
 
 private:
     // 图像
+    QImage raw_img;
+    //处理后图像
     QImage img_;
     QString imgPath_;
 
@@ -149,6 +155,7 @@ private:
     int hoverIndex_    = -1;
 
     // 新增/编辑状态（正常状态内的细分）
+    bool isMaskMode    = false; // 是否为绘制Mask模式
     bool draggingRect_ = false; // 正在画新框
     QPoint dragRectStartW_;
     QRect dragRectImg_;
@@ -159,6 +166,7 @@ private:
     QString currentClass_;
     QString currentColor_;
     QHash<QString, QSvgRenderer*> svgCache_;
+    // Mask
 
     // 参数
     const double kMinScale_  = 0.2;

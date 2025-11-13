@@ -3,8 +3,8 @@
 #include "logger/core.hpp"
 #include "service/file.hpp"
 #include "ui/image_canvas.hpp"
-#include "ui/mainwindow.hpp"
 #include "ui/info_dialog.h"
+#include "ui/mainwindow.hpp"
 #include <QApplication>
 #include <QFile>
 #include <pthread.h>
@@ -12,11 +12,11 @@
 #include <qobject.h>
 #include <qtmetamacros.h>
 
-
 #define ASSETS_PATH "/home/developer/ws/assets"
 
 int main(int argc, char* argv[]) {
     // 1) 先安装 Qt 的全局消息处理器，尽早捕获日志
+
     QApplication app(argc, argv);
 
     logger::Logger::installQtHandler();
@@ -37,8 +37,11 @@ int main(int argc, char* argv[]) {
     // }
 
     // MainWindow <-> FileService 其他连接保持
+    QObject::connect(&w, &ui::MainWindow::sigOpenFolderRequested, &files, [&]() {
+        files.openFolderDialog(DataSet::LabelMaster);
+    });
     QObject::connect(
-        &w, &ui::MainWindow::sigOpenFolderRequested, &files, &FileService::openFolderDialog);
+        &w, &ui::MainWindow::sigImportFolderRequested, &files, &FileService::importFrom);
     QObject::connect(&w, &ui::MainWindow::sigFileActivated, &files, &FileService::openIndex);
     QObject::connect(&w, &ui::MainWindow::sigDroppedPaths, &files, &FileService::openPaths);
     QObject::connect(&w, &ui::MainWindow::sigNextRequested, &files, &FileService::next);
@@ -52,7 +55,8 @@ int main(int argc, char* argv[]) {
     QObject::connect(&files, &FileService::imageReady, &w, &ui::MainWindow::showImage);
     QObject::connect(&files, &FileService::status, &w, &ui::MainWindow::setStatus);
     QObject::connect(&files, &FileService::busy, &w, &ui::MainWindow::setBusy);
-
+    QObject::connect(
+        &w, &ui::MainWindow::sigHistEqRequested, w.ui()->label, &ImageCanvas::histEqualize);
     // ImageCanvas <-> SmartDetector 连接 检测和检测结果
     QObject::connect(
         w.ui()->label, &ImageCanvas::detectRequested, &detector, &SmartDetector::detect);
@@ -65,7 +69,7 @@ int main(int argc, char* argv[]) {
         w.ui()->label, &ImageCanvas::annotationsPublished, &files, &FileService::saveLabels);
     files.exposeModel();
     w.enableDragDrop(true);
-        w.show();
+    w.show();
     LOGI("App started");
     return app.exec();
 }

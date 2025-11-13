@@ -1,6 +1,8 @@
 #pragma once
 #include <QMainWindow>
 #include <memory>
+#include <qaction.h>
+#include "service/file.hpp"
 #include "ui_mainwindow.h"
 
 QT_BEGIN_NAMESPACE
@@ -30,6 +32,7 @@ public:
 signals:
     // —— 用户输出（语义化）——
     void sigOpenFolderRequested();
+    void sigImportFolderRequested(const QAction* action);
     void sigSaveRequested();
     void sigPrevRequested();
     void sigNextRequested();
@@ -40,7 +43,6 @@ signals:
     void sigFileActivated(const QModelIndex&);
     void sigDroppedPaths(const QStringList&);
     void sigKeyCommand(const QString&);
-
     // —— 类别相关输出 ——
     void sigClassSelected(const QString& name);  // 选中类别时发出
 
