@@ -48,7 +48,7 @@ void InfoDialog::accept() {
     } else {
         text = "G";
     }
-    emit dataChanged(this->ui->lineEdit->text(), text, _isCurrent);
+    emit InfoGetted(this->ui->lineEdit->text(), text, _isCurrent);
     this->done(1);
 }
 void InfoDialog::updateInfo(

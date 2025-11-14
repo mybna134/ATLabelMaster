@@ -33,6 +33,7 @@
 #include <qinputdialog.h>
 #include <qlist.h>
 #include <qnamespace.h>
+#include <qobject.h>
 #include <qpainter.h>
 #include <qpen.h>
 #include <qpoint.h>
@@ -530,7 +531,25 @@ void ImageCanvas::mousePressEvent(QMouseEvent* e) {
         return;
     }
 }
-
+void ImageCanvas::createNewDetection() { // 画框
+    const QRect r = clampRectToImage(dragRectImg_.normalized());
+    Armor a;
+    a.p0          = QPointF(r.left(), r.top());
+    a.p1          = QPointF(r.left(), r.bottom());
+    a.p2          = QPointF(r.right(), r.bottom());
+    a.p3          = QPointF(r.right(), r.top());
+    a.cls         = currentClass_.isEmpty() ? QStringLiteral("unknown") : currentClass_;
+    a.color       = currentColor_.isEmpty() ? QStringLiteral("G") : currentColor_;
+    currentClass_ = "";
+    currentColor_ = "";
+    dets_.append(a);
+    emit annotationCommitted(a);
+    emit detectionUpdated(dets_.size() - 1, a);
+    selectedIndex_ = dets_.size() - 1;
+    emit detectionSelected(selectedIndex_);
+    dragRectImg_ = QRect();
+    update();
+}
 void ImageCanvas::mouseReleaseEvent(QMouseEvent* e) {
     if (e->button() == Qt::LeftButton) {
         // A. 结束画框 → 立刻新增
@@ -542,24 +561,8 @@ void ImageCanvas::mouseReleaseEvent(QMouseEvent* e) {
                     if (isMaskMode) { // 绘制Mask
                         drawMask(r);
                     } else {          // 画框
-                        Armor a;
-                        // TL, BL, BR, TR  (CCW)
-                        a.p0 = QPointF(r.left(), r.top());
-                        a.p1 = QPointF(r.left(), r.bottom());
-                        a.p2 = QPointF(r.right(), r.bottom());
-                        a.p3 = QPointF(r.right(), r.top());
                         promptEditSelectedInfo(true);
-                        a.cls = currentClass_.isEmpty() ? QStringLiteral("unknown") : currentClass_;
-                        a.color = currentColor_.isEmpty() ? QStringLiteral("G") : currentColor_;
-                        currentClass_ = "";
-                        currentColor_ = "";
-                        dets_.append(a);
-                        emit annotationCommitted(a);
-                        emit detectionUpdated(dets_.size() - 1, a);
-                        selectedIndex_ = dets_.size() - 1;
-                        emit detectionSelected(selectedIndex_);
-                        dragRectImg_ = QRect();
-                        update();
+                        // TL, BL, BR, TR  (CCW)
                     }
                 }
             }
@@ -836,7 +839,7 @@ void ImageCanvas::promptEditSelectedInfo(bool isCurrent) {
     // if (ok)
     //     setSelectedClass(cls.trimmed());
     ui::InfoDialog* dialog = new ui::InfoDialog(this);
-    QObject::connect(dialog, &ui::InfoDialog::dataChanged, this, &ImageCanvas::updateInfo);
+    QObject::connect(dialog, &ui::InfoDialog::InfoGetted, this, &ImageCanvas::ProcessInfoChanged);
     if (isCurrent) {
         dialog->updateInfo(true);
     } else {
@@ -964,11 +967,13 @@ void ImageCanvas::requestSave() {
     qDebug() << "requestSave called";
     emit annotationsPublished(dets_);
 }
-void ImageCanvas::updateInfo(
+void ImageCanvas::ProcessInfoChanged(
     const QString& EditedClass, const QString& Color, bool isCurrent = false) {
     if (isCurrent) {
         currentClass_ = EditedClass;
         currentColor_ = Color;
+        createNewDetection();
+
     } else {
         dets_[selectedIndex()].color = Color;
         setSelectedClass(EditedClass.trimmed());

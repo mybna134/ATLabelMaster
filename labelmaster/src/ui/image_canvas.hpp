@@ -47,7 +47,8 @@ public slots:
     // 检测结果显示/外部读写
     void setDetections(const QVector<Armor>& dets);  // 覆盖全部
     void clearDetections();
-    void addDetection(const Armor& a);               // 追加一个
+    void createNewDetection();                       // 新建一个Detction
+    void addDetection(const Armor& a);               // (新建之后调用)追加一个
     void updateDetection(int index, const Armor& a); // 更新一个
     void removeDetection(int index);                 // 删除一个
 
@@ -59,7 +60,7 @@ public slots:
     bool setSelectedIndex(int idx);                                   // -1 取消选中
     int selectedIndex() const { return selectedIndex_; }
     // 更新颜色和类型
-    void updateInfo(const QString& EditedClass, const QString& Color, bool isCurrent);
+    void ProcessInfoChanged(const QString& EditedClass, const QString& Color, bool isCurrent);
     void histEqualize();
 signals:
     // ROI
@@ -127,7 +128,7 @@ private:
 private:
     // 图像
     QImage raw_img;
-    //处理后图像
+    // 处理后图像
     QImage img_;
     QString imgPath_;
 
