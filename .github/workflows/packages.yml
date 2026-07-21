@@ -397,15 +397,6 @@ jobs:
           CONTAINER_SCRIPT
           )"
 
-      - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: labelmaster-packages-${{ github.run_id }}
-          if-no-files-found: error
-          path: |
-            dist/deb/*.deb
-            dist/flatpak/*.flatpak
-
       - name: Publish Nightly release
         if: steps.versions.outputs.has_current_tag != 'true'
         uses: softprops/action-gh-release@v2
@@ -443,6 +434,18 @@ jobs:
             dist/flatpak/labelmaster_${{ steps.versions.outputs.release_version }}_x86_64.flatpak
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clean package outputs
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if devcontainer exec --workspace-folder . bash -lc 'sudo rm -rf dist build/ci-packages'; then
+            echo "Cleaned package outputs inside devcontainer."
+          else
+            echo "Devcontainer cleanup skipped; cleaning workspace directly."
+          fi
+          rm -rf dist build/ci-packages
 
       - name: Clear GitHub Actions caches
         if: always()
