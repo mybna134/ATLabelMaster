@@ -46,7 +46,17 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 install(TARGETS ${PROJECT_NAME}
     RUNTIME DESTINATION /usr/bin
 )
-install(DIRECTORY resources/ DESTINATION /usr/share/${PROJECT_NAME}/resources)
-install(DIRECTORY assets/themes/ DESTINATION /usr/share/${PROJECT_NAME}/themes)
-install(DIRECTORY assets/icons/ DESTINATION /usr/share/${PROJECT_NAME}/icons)
-install(DIRECTORY assets/label/ DESTINATION /usr/share/${PROJECT_NAME}/label)
+
+set(APP_SHARE_DIR /usr/share/labelmaster)
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources")
+    install(DIRECTORY resources/ DESTINATION ${APP_SHARE_DIR}/resources)
+endif()
+
+install(DIRECTORY assets/themes/ DESTINATION ${APP_SHARE_DIR}/themes)
+install(DIRECTORY assets/icons/ DESTINATION ${APP_SHARE_DIR}/icons)
+install(DIRECTORY assets/label/ DESTINATION ${APP_SHARE_DIR}/label)
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/models")
+    install(DIRECTORY assets/models/ DESTINATION ${APP_SHARE_DIR}/models)
+endif()

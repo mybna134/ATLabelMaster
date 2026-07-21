@@ -1,29 +1,32 @@
 FROM ubuntu:22.04 AS labelmaster
 LABEL maintainer="3159890292@qq.com" version="1.0-base" description="labelmaster dev"
-ENV DEBIAN_FRONTEND=noninteractive 
+ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Shanghai
 SHELL ["/bin/bash", "-c"]
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake git wget curl vim gdb \
-    qt6-base-dev qt6-tools-dev qt6-tools-dev-tools \
-    libqt6svg6-dev \
-    libgl1-mesa-dev xcb libx11-xcb-dev \
+    build-essential \
+    ca-certificates \
+    cmake \
+    curl \
+    fonts-noto-cjk \
+    gdb \
+    git \
+    gnupg \
+    libeigen3-dev \
+    libgl1-mesa-dev \
     libopencv-dev \
-    libeigen3-dev \ 
-    # LLVM install dep
-    gnupg lsb-release ca-certificates \ 
-    # sudo 和 中文字体 (否则 QT ui不显示)
-    sudo fonts-noto-cjk \
+    libqt6svg6-dev \
+    libx11-xcb-dev \
+    lsb-release \
+    qt6-base-dev \
+    qt6-tools-dev \
+    qt6-tools-dev-tools \
+    sudo \
+    vim \
+    wget \
+    xcb \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
-RUN wget https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB && \
-    apt-key add GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB && \
-    echo "deb https://apt.repos.intel.com/openvino ubuntu22 main" > /etc/apt/sources.list.d/intel-openvino.list && \
-    apt-get update && \
-    apt-cache search openvino && \
-    apt-get install -y openvino-2025.3.0 && \
-    rm -f GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB && \
-    rm -rf /var/lib/apt/lists/*
 
 RUN wget https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB && \
     apt-key add GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB && \
