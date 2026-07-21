@@ -24,9 +24,21 @@ Actor Thinker 数据集标注工具
 - 滚轮 : 缩放视图
 
 ## AT 数据集格式
-color label x1 y1 x2 y2 x3 y3 x4 y4
-同样的，经典的交龙数据集格式我们同样支持，只需要在软件左上角切换数据集格式，就可以导入
- [交龙数据集](https://github.com/xinyang-go/LabelRoboMaster?tab=readme-ov-file#%E8%A3%85%E7%94%B2%E6%9D%BF%E7%B1%BB%E5%88%AB%E5%91%BD%E5%90%8D%E4%B8%8E%E7%B1%BB%E5%88%AB%E7%BC%96%E5%8F%B7)
+
+默认使用 LabelMaster V6，格式与 YOLO Pose 四关键点标签一致：
+
+```text
+class_id center_x center_y width height x0 y0 v0 x1 y1 v1 x2 y2 v2 x3 y3 v3
+```
+
+坐标均为 `[0, 1]` 归一化值，应用内部和文件点序均为 `TL -> BL -> BR -> TR`。标注界面的关键点可见性为 `0=不可见`、`2=可见`；读取时兼容已有的值 `1`。
+
+V6 的 `class_id` 兼容 `rm_label_tool.py`：支持 36 类的 `color * 9 + tag` 编码，也支持 `blue/red × {2,3,4,5,B,G,O}` 的 14 类编码。打开数据集时扫描全部 V6 标签；出现 `class_id >= 14` 使用 36 类，否则使用 14 类，空数据集默认 36 类。
+
+打开目录时会扫描全部非空标签并自动识别格式，不再需要在设置中选择输入或输出格式。V6 和 V4 直接打开；V5 自动转换为 V6；LabelMaster V1/V2/V3、HITSZ、UPC、NWPU 自动转换为 V4。空数据集默认 V6。格式候选不唯一、目录混用格式或标签损坏时会停止转换且不改写标签，冲突对话框右上角的 `?` 可查看全部格式说明。
+
+经典的交龙数据集格式同样支持，直接打开图片目录即可自动识别并导入：
+[交龙数据集](https://github.com/xinyang-go/LabelRoboMaster?tab=readme-ov-file#%E8%A3%85%E7%94%B2%E6%9D%BF%E7%B1%BB%E5%88%AB%E5%91%BD%E5%90%8D%E4%B8%8E%E7%B1%BB%E5%88%AB%E7%BC%96%E5%8F%B7)
 
 我们拆分了检测头，让Label也可读一些。
 

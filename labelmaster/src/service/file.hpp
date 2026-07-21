@@ -10,7 +10,6 @@
 #include <QSize>
 #include <QStringList>
 #include <QVector>
-#include <qaction.h>
 #include <qobject.h>
 
 class QAbstractItemModel;
@@ -29,7 +28,6 @@ public:
 public slots:
     // === 打开 ===
     void openFolderDialog(const DataSet& type = DataSet::Auto); // 弹框选目录
-    void importFrom(const QAction* action);                     // 导入其他数据集
     void openPaths(const QStringList&);                                 // 拖拽/命令行路径
     void openIndex(const QModelIndex&);                                 // 由文件树激活
 
@@ -86,7 +84,9 @@ private:
         const QString& labelPath, const QVector<Armor>& armors,
         const QSize& imgSize);                                         // 保存为归一化
     static QVector<Armor>
-        readLabelFile(const QString& labelPath, const QSize& imgSize); // 自动反归一化
+        readLabelFile(
+            const QString& labelPath, const QSize& imgSize,
+            DataSet format); // 按当前数据集格式读取并反归一化
 
 private:
     QString pendingDir_;
@@ -97,5 +97,6 @@ private:
     QPersistentModelIndex proxyCurrent_;
     QString currentImagePath_;                                         // 当前图片绝对路径
     QSize currentImageSize_;                                           // 当前图片尺寸（归一化需要）
-    DataSet currentDataSet = DataSet::LabelMaster2;
+    DataSet currentDataSet = DataSet::Auto;
+    bool formatDetectionAttempted_ = false;
 };

@@ -2,13 +2,16 @@
 #include "controller/settings.hpp"
 #include "ui_settings_dialog.h"
 #include "util/id_convert.hpp"
-#include "util/svg_constants.hpp"
 #include "ui/pixel_widgets/theme_manager.hpp"
 #include <qcombobox.h>
 #include <qdir.h>
 #include <qfile.h>
 #include <qfiledialog.h>
 #include <qfileinfo.h>
+#include <QFrame>
+#include <QGridLayout>
+#include <QLayoutItem>
+#include <QScrollArea>
 #include <qglobal.h>
 #include <qnamespace.h>
 #include <qmessagebox.h>
@@ -16,9 +19,7 @@
 #include <qplaintextedit.h>
 #include <qvariant.h>
 #include <qwidget.h>
-#include <QTransform>
-#include <QPolygonF>
-#include <limits>
+#include <QVBoxLayout>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 #include <QStringConverter>
 #endif
@@ -26,10 +27,87 @@
 using namespace ui;
 using labelmaster::ui::ThemeManager;
 
+namespace {
+void normalizeBehaviorGroup(Ui::SettingsDialog* ui) {
+    if (!ui || !ui->groupBox || ui->groupBox->layout())
+        return;
+
+    if (ui->horizontalLayout) {
+        ui->horizontalLayout->removeWidget(ui->auto_save_checkbox);
+        ui->horizontalLayout->removeWidget(ui->auto_enhance_checkbox);
+    }
+    if (ui->horizontalLayoutWidget)
+        ui->horizontalLayoutWidget->hide();
+
+    ui->auto_save_checkbox->setParent(ui->groupBox);
+    ui->auto_enhance_checkbox->setParent(ui->groupBox);
+
+    auto* behaviorLayout = new QGridLayout(ui->groupBox);
+    behaviorLayout->setObjectName(QStringLiteral("gridBehavior"));
+    behaviorLayout->setContentsMargins(12, 18, 12, 12);
+    behaviorLayout->setHorizontalSpacing(10);
+    behaviorLayout->setVerticalSpacing(10);
+    behaviorLayout->setColumnStretch(1, 1);
+
+    behaviorLayout->addWidget(ui->v_rate_tip_label, 0, 0);
+    behaviorLayout->addWidget(ui->v_rate_slider, 0, 1);
+    behaviorLayout->addWidget(ui->v_rate_label, 0, 2);
+    behaviorLayout->addWidget(ui->auto_save_checkbox, 1, 0);
+    behaviorLayout->addWidget(ui->auto_enhance_checkbox, 1, 1, 1, 2);
+}
+
+void wrapSettingsInScrollArea(QDialog* dialog, Ui::SettingsDialog* ui) {
+    if (!dialog || !ui)
+        return;
+
+    auto* rootLayout = qobject_cast<QVBoxLayout*>(dialog->layout());
+    if (!rootLayout)
+        return;
+
+    auto* scrollContent = new QWidget(dialog);
+    auto* contentLayout = new QVBoxLayout(scrollContent);
+    contentLayout->setContentsMargins(0, 0, 0, 0);
+    contentLayout->setSpacing(rootLayout->spacing());
+
+    QLayoutItem* item = nullptr;
+    while ((item = rootLayout->takeAt(0)) != nullptr) {
+        QWidget* widget = item->widget();
+        if (widget == ui->buttonBox) {
+            delete item;
+            continue;
+        }
+        if (widget) {
+            widget->setParent(scrollContent);
+            contentLayout->addWidget(widget);
+            delete item;
+            continue;
+        }
+
+        contentLayout->addItem(item);
+    }
+
+    contentLayout->addStretch(1);
+
+    auto* scrollArea = new QScrollArea(dialog);
+    scrollArea->setObjectName(QStringLiteral("settings_scroll_area"));
+    scrollArea->setWidgetResizable(true);
+    scrollArea->setFrameShape(QFrame::NoFrame);
+    scrollArea->setWidget(scrollContent);
+
+    rootLayout->addWidget(scrollArea, 1);
+    rootLayout->addWidget(ui->buttonBox);
+    dialog->setMinimumSize(480, 520);
+    dialog->resize(560, 720);
+}
+
+} // namespace
+
 SettingsDialog::SettingsDialog(QWidget* parent)
     : QDialog(parent)
     , ui_(new Ui::SettingsDialog) {
     ui_->setupUi(this);
+    normalizeBehaviorGroup(ui_);
+    wrapSettingsInScrollArea(this, ui_);
     this->setWindowTitle("Settings");
     this->ui_->dataset_dir_edit->setText(controller::AppSettings::instance().saveDir());
     this->ui_->last_img_dir_edit->setText(controller::AppSettings::instance().lastImageDir());
@@ -79,17 +157,6 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     connect(this->ui_->roi_w_spin, &QSpinBox::editingFinished, this, &SettingsDialog::setRoiW);
     connect(this->ui_->theme_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SettingsDialog::setTheme);
 
-    // 初始化格式选择（先设置值，再连接信号）
-    ui_->format_combo->setCurrentIndex(controller::AppSettings::instance().outputFormat());
-    connect(ui_->format_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, [this](int index) {
-        controller::AppSettings::instance().setoutputFormat(index);
-    });
-    // Note: batch_convert_button signal is already connected in settings_dialog.ui
-    // 初始化导入格式选择
-    ui_->import_format_combo->setCurrentIndex(controller::AppSettings::instance().importFormat());
-    connect(ui_->import_format_combo, QOverload<int>::of(&QComboBox::currentIndexChanged),
-            this, &SettingsDialog::setimportFormat);
 }
 void SettingsDialog::SaveDirEditUpdate() {
     const QString dir = QFileDialog::getExistingDirectory(
@@ -398,209 +465,5 @@ void SettingsDialog::setTheme(int index) {
     // Apply theme immediately (hot reload)
     ThemeManager::instance().loadTheme(themeId);
 
-    update();
-}
-
-// ---------- 批量转换功能 ----------
-void SettingsDialog::performBatchConvert() {
-    // 目标格式 = 当前选择的格式（0=11字段, 1=15字段）
-    int targetFormat = controller::AppSettings::instance().outputFormat();
-    QString labelDir = controller::AppSettings::instance().saveDir();
-
-    // 确认对话框
-    QString formatName = (targetFormat == 1) ? "Rect + Points (15 fields)" : "Points Only (11 fields)";
-    QMessageBox::StandardButton reply = QMessageBox::question(
-        this, "确认转换",
-        QString("将当前目录所有标签转换为:\n%1\n\n继续?").arg(formatName),
-        QMessageBox::Yes | QMessageBox::No);
-    if (reply == QMessageBox::No) return;
-
-    // 获取标签目录
-    QDir dir(labelDir);
-    if (!dir.isAbsolute()) {
-        QString lastImgDir = controller::AppSettings::instance().lastImageDir();
-        if (!lastImgDir.isEmpty()) {
-            dir = QDir(QDir::cleanPath(QFileInfo(lastImgDir).absolutePath() + "/../" + labelDir));
-        }
-    }
-
-    QStringList filters; filters << "*.txt";
-    dir.setNameFilters(filters);
-    QFileInfoList fileList = dir.entryInfoList(QDir::Files | QDir::Readable);
-
-    int successCount = 0, skipCount = 0, failCount = 0;
-
-    for (const QFileInfo& fileInfo : fileList) {
-        QFile file(fileInfo.absoluteFilePath());
-        if (!file.open(QIODevice::ReadWrite | QIODevice::Text)) { failCount++; continue; }
-
-        QTextStream in(&file);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-        in.setEncoding(QStringConverter::Utf8);
-#else
-        in.setCodec("UTF-8");
-#endif
-
-        QStringList newLines;
-        bool fileModified = false;
-
-        while (!in.atEnd()) {
-            QString line = in.readLine();
-            int hashIdx = line.indexOf('#');
-            if (hashIdx >= 0) {
-                if (hashIdx == 0) { newLines.append(line); continue; }
-                line = line.left(hashIdx);
-            }
-
-            QString trimmed = line.trimmed();
-            if (trimmed.isEmpty()) { newLines.append(line); continue; }
-
-            QStringList parts = trimmed.simplified().split(' ');
-
-            // 判断当前行的格式
-            bool isCurrent11 = (parts.size() == 11);
-            bool isCurrent15 = (parts.size() == 15);
-
-            // 如果目标是15字段，且当前是11字段 → 转换
-            if (targetFormat == 1 && isCurrent11) {
-                // 11字段 → 15字段
-                // color size cls x0 y0 x1 y1 x2 y2 x3 y3
-                // → color size cls x y w h x0 y0 x1 y1 x2 y2 x3 y3
-
-                bool ok = true;
-                auto tod = [&](int i) -> double {
-                    bool o = false;
-                    double v = parts[i].toDouble(&o);
-                    ok &= o;
-                    return v;
-                };
-                if (ok) {
-                    // 读取基本信息
-                    int size = parts[1].toInt();
-
-                    // 读取四个锚点（归一化坐标）
-                    QPointF p0(tod(3), tod(4));  // TL
-                    QPointF p1(tod(5), tod(6));  // BL
-                    QPointF p2(tod(7), tod(8));  // BR
-                    QPointF p3(tod(9), tod(10)); // TR
-
-                    // 获取SVG模板
-                    const auto& svgTemplate = (size == 0)
-                        ? labelmaster::util::SvgConstants::smallArmor()
-                        : labelmaster::util::SvgConstants::bigArmor();
-
-                    // SVG四边形（四个角点）
-                    QPolygonF svg_quad;
-                    svg_quad << QPointF(0., 0.)
-                             << QPointF(0., svgTemplate.height)
-                             << QPointF(svgTemplate.width, svgTemplate.height)
-                             << QPointF(svgTemplate.width, 0.);
-
-                    // 图像锚点（归一化坐标）
-                    QPolygonF img_anchors;
-                    img_anchors << p0 << p1 << p2 << p3;
-
-                    // 透视变换
-                    QTransform transform;
-                    double x, y, w, h;
-
-                    if (QTransform::quadToQuad(svgTemplate.anchors, img_anchors, transform)) {
-                        // 将SVG四边形变换到图像空间
-                        QPolygonF img_corners = transform.map(svg_quad);
-
-                        // 计算边界框（最小外接矩形）
-                        double min_x = std::numeric_limits<double>::max();
-                        double min_y = std::numeric_limits<double>::max();
-                        double max_x = std::numeric_limits<double>::lowest();
-                        double max_y = std::numeric_limits<double>::lowest();
-
-                        for (const auto& pt : img_corners) {
-                            min_x = std::min(min_x, pt.x());
-                            min_y = std::min(min_y, pt.y());
-                            max_x = std::max(max_x, pt.x());
-                            max_y = std::max(max_y, pt.y());
-                        }
-
-                        // 计算中心点和尺寸（已经是归一化坐标）
-                        w = max_x - min_x;
-                        h = max_y - min_y;
-                        x = (min_x + max_x) / 2.0;
-                        y = (min_y + max_y) / 2.0;
-
-                        // Clamp to [0,1]
-                        auto clamp01 = [](double v) { return std::clamp(v, 0.0, 1.0); };
-                        x = clamp01(x);
-                        y = clamp01(y);
-                        w = clamp01(w);
-                        h = clamp01(h);
-                    } else {
-                        // 透视变换失败时的fallback：使用简单的锚点边界框
-                        double min_x = std::min({p0.x(), p1.x(), p2.x(), p3.x()});
-                        double min_y = std::min({p0.y(), p1.y(), p2.y(), p3.y()});
-                        double max_x = std::max({p0.x(), p1.x(), p2.x(), p3.x()});
-                        double max_y = std::max({p0.y(), p1.y(), p2.y(), p3.y()});
-
-                        w = max_x - min_x;
-                        h = max_y - min_y;
-                        x = (min_x + max_x) / 2.0;
-                        y = (min_y + max_y) / 2.0;
-                    }
-
-                    // 输出: color size cls x y w h x0 y0 x1 y1 x2 y2 x3 y3
-                    line = QString("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15")
-                        .arg(parts[0]).arg(parts[1]).arg(parts[2])
-                        .arg(x).arg(y).arg(w).arg(h)
-                        .arg(parts[3]).arg(parts[4])  // x0, y0
-                        .arg(parts[5]).arg(parts[6])  // x1, y1
-                        .arg(parts[7]).arg(parts[8])  // x2, y2
-                        .arg(parts[9]).arg(parts[10]); // x3, y3
-                    fileModified = true;
-                }
-            }
-            // 如果目标是11字段，且当前是15字段 → 转换
-            else if (targetFormat == 0 && isCurrent15) {
-                // 15字段 → 11字段
-                // 格式: color size cls x y w h x0 y0 x1 y1 x2 y2 x3 y3
-                //       → color size cls x0 y0 x1 y1 x2 y2 x3 y3
-                // 保留SVG锚点 (x0,y0=TL, x1,y1=BL, x2,y2=BR, x3,y3=TR)
-                // 丢弃bbox信息 (x y w h)
-                line = QString("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11")
-                    .arg(parts[0]).arg(parts[1]).arg(parts[2])
-                    .arg(parts[7]).arg(parts[8])   // x0, y0 (TL)
-                    .arg(parts[9]).arg(parts[10])  // x1, y1 (BL)
-                    .arg(parts[11]).arg(parts[12]) // x2, y2 (BR)
-                    .arg(parts[13]).arg(parts[14]); // x3, y3 (TR)
-                fileModified = true;
-            }
-            // 如果已经是目标格式，保持不变
-            else {
-                // 保留原行
-            }
-            newLines.append(line);
-        }
-
-        if (fileModified) {
-            file.resize(0);
-            QTextStream out(&file);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-            out.setEncoding(QStringConverter::Utf8);
-#else
-            out.setCodec("UTF-8");
-#endif
-            for (const QString& newLine : newLines) { out << newLine << '\n'; }
-            successCount++;
-        } else {
-            skipCount++;
-        }
-        file.close();
-    }
-
-    QMessageBox::information(this, "转换完成",
-        QString("转换成功: %1 个文件\n已跳过: %2 个文件\n转换失败: %3 个文件").arg(successCount).arg(skipCount).arg(failCount));
-}
-
-// ---------- 数据集导入格式 ----------
-void SettingsDialog::setimportFormat(int index) {
-    controller::AppSettings::instance().setimportFormat(index);
     update();
 }

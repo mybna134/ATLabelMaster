@@ -100,10 +100,10 @@ public:
 };
 
 /**
- * @brief LabelMasterV4 format with class token first
+ * @brief LabelMasterV4 format with numeric class id first
  *
  * Format: cls x_c y_c w h x0 y0 x1 y1 x2 y2 x3 y3
- * cls: color*size*num (e.g., "R1", "B2", "G3")
+ * cls: color * 16 + size * 8 + class
  * x_c, y_c, w, h: normalized bounding box (center format) [0,1]
  * x0,y0,x1,y1,x2,y2,x3,y3: normalized four corner points [0,1]
  */

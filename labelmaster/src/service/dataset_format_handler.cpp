@@ -277,20 +277,19 @@ bool LabelMasterV4Format::read(
         QStringList parts = line.simplified().split(' ');
 
         // Format: cls x_c y_c w h x0 y0 x1 y1 x2 y2 x3 y3
-        // cls: color*size*num (e.g., "R1", "B2", "G3")
+        // cls = color * 16 + size * 8 + class
         if (parts.size() != 13)
             continue;
 
         Armor armor;
-        QString cls = parts[0];
+        bool ok = false;
+        const int clsId = parts[0].toInt(&ok);
+        if (!ok || clsId < 0 || clsId >= 64)
+            continue;
 
-        // Parse color from first character
-        if (!cls.isEmpty()) {
-            armor.color = cls.at(0).toUpper(); // R, B, G, P
-        }
-
-        // Parse class token (could be like "R1" -> "R1", "B10" -> "B10")
-        armor.cls = cls;
+        armor.color = IdConvert::colorId2Letter(clsId / 16);
+        armor.size  = (clsId % 16) / 8;
+        armor.cls   = IdConvert::idCollect2Token(clsId % 8);
 
         // Store normalized bbox
         armor.norm_x = parts[1].toDouble();
@@ -330,8 +329,9 @@ bool LabelMasterV4Format::write(
     const double H = double(imgSize.height());
 
     for (const auto& armor : armors) {
-        // Use cls directly (e.g., "R1", "B2")
-        stream << armor.cls << ' ';
+        const int colorId = IdConvert::colorLetter2Id(armor.color);
+        const int classId = IdConvert::classToken2Id(armor.cls);
+        stream << colorId * 16 + armor.size * 8 + classId << ' ';
 
         // Calculate bbox using SVG perspective transformation (same as file.cpp)
         double x, y, w, h;

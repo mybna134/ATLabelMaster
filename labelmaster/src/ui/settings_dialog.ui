@@ -83,71 +83,6 @@
     </widget>
    </item>
    <item>
-    <widget class="QGroupBox" name="group_import_format">
-     <property name="title">
-      <string>数据集导入格式</string>
-     </property>
-     <layout class="QGridLayout" name="gridImportFormat">
-      <item row="0" column="0">
-       <widget class="QLabel" name="label_import_format">
-        <property name="text">
-         <string>导入格式:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="0" column="1">
-       <widget class="QComboBox" name="import_format_combo">
-        <item>
-         <property name="text">
-          <string>LabelMasterV2 (Native)</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>LabelMasterV1</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>LabelMasterV3 (15 fields)</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>LabelMasterV4 (13 fields)</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>HITSZ</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>UPC</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>NMPU</string>
-         </property>
-        </item>
-       </widget>
-      </item>
-      <item row="1" column="0" colspan="2">
-       <widget class="QLabel" name="label_import_tip">
-        <property name="text">
-         <string>选择格式后，点击主界面的"打开文件夹"导入数据集</string>
-        </property>
-        <property name="styleSheet">
-         <string notr="true">color: #9ece6a; font-size: 10px;</string>
-        </property>
-        </widget>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
     <widget class="QGroupBox" name="groupBox">
      <property name="title">
       <string>行为</string>
@@ -332,48 +267,6 @@
         </property>
         <property name="styleSheet">
          <string notr="true">color: #9ece6a; font-size: 10px;</string>
-        </property>
-       </widget>
-      </item>
-     </layout>
-    </widget>
-   </item>
-   <item>
-    <widget class="QGroupBox" name="group_label_format">
-     <property name="title">
-      <string>标签格式</string>
-     </property>
-     <layout class="QGridLayout" name="gridLabelFormat">
-      <item row="0" column="0">
-       <widget class="QLabel" name="label_format">
-        <property name="text">
-         <string>输出格式:</string>
-        </property>
-       </widget>
-      </item>
-      <item row="0" column="1">
-       <widget class="QComboBox" name="format_combo">
-        <item>
-         <property name="text">
-          <string>Points Only (11 fields)</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>Rect + Points (15 fields)</string>
-         </property>
-        </item>
-        <item>
-         <property name="text">
-          <string>Class + Rect + Points (13 fields)</string>
-         </property>
-        </item>
-       </widget>
-      </item>
-      <item row="1" column="0" colspan="2">
-       <widget class="QPushButton" name="batch_convert_button">
-        <property name="text">
-         <string>批量转换当前目录</string>
         </property>
        </widget>
       </item>
@@ -733,18 +626,11 @@
     </hint>
    </hints>
   </connection>
-  <connection>
-   <sender>batch_convert_button</sender>
-   <signal>clicked()</signal>
-   <receiver>SettingsDialog</receiver>
-   <slot>performBatchConvert()</slot>
-  </connection>
  </connections>
  <slots>
   <slot>LastImageDirEditUpdate()</slot>
   <slot>SaveDirEditUpdate()</slot>
   <slot>LastImagePathEditUpdate()</slot>
   <slot>performBatchReplace()</slot>
-  <slot>performBatchConvert()</slot>
  </slots>
 </ui>

@@ -37,18 +37,6 @@ struct Detector {
 
         const QString dir = assets_path + "/models/";
         try {
-            const QString xml = dir + "model-opt-int8.xml";
-            if (QFile::exists(xml)) {
-                model_    = core_.read_model(xml.toStdString()); // 自动加载同名 .bin
-                compiled_ = core_.compile_model(model_, "CPU");
-                request_  = compiled_.create_infer_request();
-                mode_     = Mode::OV_INT8_CPU;
-                return;
-            }
-        } catch (const std::exception& e) {
-            qWarning() << "OpenVINO INT8 failed:" << e.what();
-        }
-        try {
             const QString onnx = dir + "model-opt.onnx";
             if (!QFile::exists(onnx)) {
                 qWarning() << "ONNX model not found:" << onnx;

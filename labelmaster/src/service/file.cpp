@@ -2,18 +2,24 @@
 // File: service/file.cpp
 // ===============================
 #include "service/file.hpp"
+#include "service/label_format.hpp"
 #include "../util/id_convert.hpp"
 #include "../util/svg_constants.hpp"
-#include "detector/ai/detector.hpp"
 #include "types.hpp"
 #include <QBuffer>
+#include <QApplication>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
+#include <QDirIterator>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFileSystemModel>
 #include <QImage>
 #include <QImageReader>
+#include <QMessageBox>
 #include <QQueue>
 #include <QSettings>
 #include <QSortFilterProxyModel>
@@ -45,8 +51,11 @@
 # include <QStringConverter> // Qt6: QTextStream::setEncoding
 #endif
 #include <QTextStream>
+#include <QTextBrowser>
 #include <QTimer>
 #include <QUrl>
+#include <QVBoxLayout>
+#include <QWhatsThis>
 
 #include <algorithm>
 #include <cmath>
@@ -85,6 +94,130 @@ protected:
         return false;
     }
 };
+
+bool directoryContainsImage(const QString& dirPath) {
+    QDirIterator it(dirPath, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+    return it.hasNext();
+}
+
+QString imageDirectoryFromParent(const QString& parentPath) {
+    const QDir parent(parentPath);
+    const QStringList imageDirNames = {
+        QStringLiteral("images"),
+        QStringLiteral("image"),
+        QStringLiteral("imgs"),
+        QStringLiteral("img"),
+    };
+
+    QString firstExisting;
+    for (const QString& name : imageDirNames) {
+        const QString candidate = QDir::cleanPath(parent.filePath(name));
+        if (!QFileInfo(candidate).isDir())
+            continue;
+        if (firstExisting.isEmpty())
+            firstExisting = candidate;
+        if (directoryContainsImage(candidate))
+            return candidate;
+    }
+
+    return firstExisting.isEmpty() ? QDir::cleanPath(parentPath) : firstExisting;
+}
+
+QString formatHelpHtml() {
+    return QStringLiteral(
+        "<h2>支持的标签格式</h2>"
+        "<p>坐标均可为归一化值；<code>pts</code> 的点序为 TL、BL、BR、TR。</p>"
+        "<table cellspacing='8'>"
+        "<tr><th align='left'>格式</th><th align='left'>字段布局</th><th align='left'>自动处理</th></tr>"
+        "<tr><td>V1（10）</td><td><code>color class pts[4]</code></td><td>转 V4；与部分 UPC 数据不可区分</td></tr>"
+        "<tr><td>V2（11）</td><td><code>color size class pts[4]</code></td><td>转 V4</td></tr>"
+        "<tr><td>V3（15）</td><td><code>color size class bbox pts[4]</code></td><td>转 V4</td></tr>"
+        "<tr><td>V4（13）</td><td><code>combined-class bbox pts[4]</code></td><td>直接打开</td></tr>"
+        "<tr><td>V5 / Bevy（15）</td><td><code>color size class center left-points left-vis right-points right-vis</code></td><td>转 V6</td></tr>"
+        "<tr><td>V6（17）</td><td><code>class bbox (x y visibility)[4]</code>；可见性使用 0/2</td><td>直接打开</td></tr>"
+        "<tr><td>HITSZ（10）</td><td><code>pts[4] class color</code></td><td>转 V4</td></tr>"
+        "<tr><td>UPC（10）</td><td><code>color class pts[4]</code></td><td>转 V4；类别 0～7 时可能与 V1 冲突</td></tr>"
+        "<tr><td>NWPU（9）</td><td><code>combined-class pts[4]</code></td><td>转 V4</td></tr>"
+        "</table>"
+        "<h3>字段说明</h3>"
+        "<ul>"
+        "<li><code>bbox</code> 依次为中心点 x/y、宽、高；<code>pts[4]</code> 为四组 x/y。</li>"
+        "<li>V1、V2、V3、UPC 的 <code>color</code> 位于行首；HITSZ 将 <code>class color</code> 放在行尾。</li>"
+        "<li>V5 的左右灯条各有两个端点及一个 0/1 可见性位，转换后分别映射到 V6 的两个关键点并写为 0/2。</li>"
+        "<li>V6 的四个关键点各自携带可见性；编辑器写 0=不可见、2=可见，读取兼容 1。</li>"
+        "<li>V6 类别兼容 14 类和 36 类体系；扫描到 class_id≥14 时使用 36 类，否则按参考工具规则使用 14 类，空数据集使用 36 类。</li>"
+        "<li>V4 和 NWPU 的组合类别按 <code>color*16 + size*8 + class</code> 解码。</li>"
+        "</ul>"
+        "<h3>识别规则</h3>"
+        "<p>程序扫描目录内全部非空标签，只有所有文件都指向同一个格式时才会转换。"
+        "V5 的可见性位和中心点关系具有更高识别优先级。空数据集默认使用 V6。"
+        "若候选格式仍不唯一、目录混用格式或标签损坏，程序会停止且不会改写任何标签。</p>");
+}
+
+void showFormatHelp(QWidget* parent) {
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QObject::tr("标签格式详解"));
+    dialog.resize(760, 560);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* browser = new QTextBrowser(&dialog);
+    browser->setHtml(formatHelpHtml());
+    layout->addWidget(browser);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    dialog.exec();
+}
+
+class FormatConflictMessageBox final : public QMessageBox {
+public:
+    explicit FormatConflictMessageBox(
+        const labelmaster::service::label_format::FormatDetectionResult& detection,
+        QWidget* parent = nullptr)
+        : QMessageBox(parent) {
+        setIcon(QMessageBox::Warning);
+        setWindowTitle(tr("标签格式冲突"));
+        setText(tr("无法安全地自动识别标签格式，未修改任何标签。"));
+        setInformativeText(detection.error + tr("\n\n点击标题栏右上角的 ? 查看所有格式详解。"));
+        setStandardButtons(QMessageBox::Ok);
+        setWindowFlag(Qt::WindowContextHelpButtonHint, true);
+        qApp->installEventFilter(this);
+    }
+
+    ~FormatConflictMessageBox() override { qApp->removeEventFilter(this); }
+
+protected:
+    bool event(QEvent* event) override {
+        if (event->type() == QEvent::EnterWhatsThisMode
+            || event->type() == QEvent::WhatsThis
+            || event->type() == QEvent::WhatsThisClicked) {
+            queueFormatHelp();
+            return true;
+        }
+        return QMessageBox::event(event);
+    }
+
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::EnterWhatsThisMode && isVisible()) {
+            queueFormatHelp();
+            return true;
+        }
+        return QMessageBox::eventFilter(watched, event);
+    }
+
+private:
+    void queueFormatHelp() {
+        if (helpPending_)
+            return;
+        helpPending_ = true;
+        QWhatsThis::leaveWhatsThisMode();
+        QTimer::singleShot(0, this, [this] {
+            showFormatHelp(this);
+            helpPending_ = false;
+        });
+    }
+
+    bool helpPending_ = false;
+};
 } // namespace
 
 // ---------- 构造 / 析构 ----------
@@ -100,6 +233,7 @@ FileService::FileService(QObject* parent)
     proxy_->setSourceModel(fsModel_);
     proxy_->setRecursiveFilteringEnabled(true);
     proxy_->setDynamicSortFilter(true);
+    currentDataSet = DataSet::Auto;
     // Don't use DirectoryLoaded , need sort
     connect(
         fsModel_, &QFileSystemModel::directoryLoaded, this, &FileService::selectFirst,
@@ -121,21 +255,6 @@ FileService::~FileService() = default;
 // ---------- 模型暴露 ----------
 void FileService::exposeModel() { emit modelReady(proxy_); }
 
-void FileService::importFrom(const QAction* action) {
-    DataSet dataset;
-    if (action->objectName() == "actionLMV1") {
-        dataset = DataSet::LabelMaster;
-    } else if (action->objectName() == "actionHITSZ") { // 南工骁鹰
-        dataset = DataSet::HITSZ;
-    } else if (action->objectName() == "actionUPC") {
-        dataset = DataSet::UPC;
-    } else if (action->objectName() == "actionNWPU") {
-        dataset = DataSet::NWPU;
-    } else if (action->objectName() == "actionLMV3") {
-        dataset = DataSet::LabelMaster3; // 新增: 15字段格式
-    }
-    openFolderDialog(dataset);
-}
 // ---------- 打开入口 ----------
 
 void FileService::openFolderDialog(const DataSet& type) {
@@ -145,23 +264,27 @@ void FileService::openFolderDialog(const DataSet& type) {
     if (dir.isEmpty())
         return;
 
-    // If type is not specified (Auto), read from settings
-    if (type == DataSet::Auto) {
-        int formatIndex = controller::AppSettings::instance().importFormat();
-        switch (formatIndex) {
-            case 0: currentDataSet = DataSet::LabelMaster2; break;  // LabelMasterV2 (Native)
-            case 1: currentDataSet = DataSet::LabelMaster; break;   // LabelMasterV1
-            case 2: currentDataSet = DataSet::LabelMaster3; break;  // LabelMasterV3 (15 fields)
-            case 3: currentDataSet = DataSet::LabelMasterV4; break; // LabelMasterV4 (13 fields)
-            case 4: currentDataSet = DataSet::HITSZ; break;         // HITSZ
-            case 5: currentDataSet = DataSet::UPC; break;           // UPC
-            case 6: currentDataSet = DataSet::NWPU; break;          // NMPU
-            default: currentDataSet = DataSet::LabelMaster2; break;
-        }
-    } else {
-        currentDataSet = type;
-    }
-    openDir(dir);
+    QMessageBox box;
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(tr("选择目录类型"));
+    box.setText(tr("你选择的是图片所在目录，还是图片所在目录的父目录？"));
+    box.setInformativeText(tr("选择父目录时，会优先打开其中的 images/image/imgs/img 子目录。"));
+    auto* imageDirButton = box.addButton(tr("图片所在目录"), QMessageBox::AcceptRole);
+    auto* parentDirButton = box.addButton(tr("图片目录父目录"), QMessageBox::ActionRole);
+    auto* cancelButton = box.addButton(QMessageBox::Cancel);
+    box.exec();
+    auto* clickedButton = box.clickedButton();
+    if (clickedButton == cancelButton
+        || (clickedButton != imageDirButton && clickedButton != parentDirButton))
+        return;
+
+    const QString openPath = clickedButton == parentDirButton
+        ? imageDirectoryFromParent(dir)
+        : QDir::cleanPath(dir);
+
+    Q_UNUSED(type);
+    currentDataSet = DataSet::Auto;
+    openDir(openPath);
 }
 // 目录加载完成后如果需要导入，则进行导入，如果不需要导入再尝试选第一张
 void FileService::selectFirst(const QString& path) {
@@ -172,6 +295,8 @@ void FileService::selectFirst(const QString& path) {
     if (!(path == pendingDir_ || path.startsWith(pendingDir_ + '/'))) {
         return;
     };
+    if (formatDetectionAttempted_)
+        return;
     if (tryImportDataSetAfterLoaded()) {
         tryOpenFirstAfterLoaded(pendingDir_);
     }
@@ -205,6 +330,10 @@ QModelIndex FileService::findFirstImageUnder(const QModelIndex& proxyRoot) const
 }
 
 bool FileService::openFileAt(const QModelIndex& proxyIndex) {
+    if (currentDataSet == DataSet::Auto) {
+        emit status(tr("标签格式尚未安全识别，无法打开图片"), 3000);
+        return false;
+    }
     const QModelIndex s = mapFromProxyToSource(proxyIndex);
     if (!s.isValid() || fsModel_->isDir(s))
         return false;
@@ -239,7 +368,7 @@ bool FileService::openFileAt(const QModelIndex& proxyIndex) {
             emit labelTextChanged(labelText);
             labelFile.close();
         }
-        QVector<Armor> armors = readLabelFile(lbl, currentImageSize_);
+        QVector<Armor> armors = readLabelFile(lbl, currentImageSize_, currentDataSet);
         emit labelsLoaded(armors);
     } else {
         emit labelTextChanged("");
@@ -338,10 +467,12 @@ bool FileService::openDir(const QString& dir) {
 
     QString lastDir = fsModel_->rootPath();
     pendingDir_     = dir; // 不清空 pendingTargetPath_，以便恢复时指定目标文件
+    formatDetectionAttempted_ = false;
     if (lastDir == dir) {
-        LOGW(QString("目录已经打开：%1").arg(dir));
-        emit busy(false);
-        return false;
+        LOGI(QString("重新扫描已打开目录：%1").arg(dir));
+        if (tryImportDataSetAfterLoaded())
+            tryOpenFirstAfterLoaded(dir);
+        return true;
     }
     const QModelIndex srcRoot = fsModel_->setRootPath(dir);                        // 异步开始
     if (!srcRoot.isValid()) {
@@ -382,6 +513,124 @@ bool FileService::setProxyRoot(const QString& dir) {
     return true;
 }
 bool FileService::tryImportDataSetAfterLoaded() {
+    formatDetectionAttempted_ = true;
+    QVector<labelmaster::service::label_format::LabelFileSample> samples;
+    QSet<QString> visitedLabels;
+    QDirIterator detectionIterator(
+        pendingDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+    while (detectionIterator.hasNext()) {
+        const QString imagePath = detectionIterator.next();
+        const QString labelPath = labelFileForImage(imagePath);
+        if (!QFile::exists(labelPath) || visitedLabels.contains(labelPath))
+            continue;
+        visitedLabels.insert(labelPath);
+
+        QImageReader reader(imagePath);
+        const QSize imageSize = reader.size();
+        if (imageSize.isEmpty()) {
+            emit busy(false);
+            emit status(
+                tr("格式识别失败：无法读取图片尺寸 %1").arg(QFileInfo(imagePath).fileName()),
+                4000);
+            return false;
+        }
+        samples.push_back({labelPath, imageSize});
+    }
+
+    const auto detection = labelmaster::service::label_format::detectDataSetFormat(samples);
+    if (!detection.succeeded()) {
+        emit busy(false);
+        emit status(tr("标签格式冲突，未修改任何标签"), 5000);
+        FormatConflictMessageBox dialog(detection, QApplication::activeWindow());
+        dialog.exec();
+        return false;
+    }
+
+    currentDataSet = detection.format;
+    PoseClassScheme poseScheme = detection.poseClassScheme;
+    controller::AppSettings::instance().setv6ClassScheme(static_cast<int>(poseScheme));
+
+    if (isDirectOpenFormat(currentDataSet)) {
+        const LabelOutputFormat directFormat = currentDataSet == DataSet::LabelMasterV6
+            ? LabelOutputFormat::LabelMasterV6
+            : LabelOutputFormat::LabelMasterV4;
+        controller::AppSettings::instance().setoutputFormat(static_cast<int>(directFormat));
+        emit status(
+            detection.hasAnnotations
+                ? tr("自动识别为 %1，直接打开")
+                      .arg(labelmaster::service::label_format::dataSetName(currentDataSet))
+                : tr("未发现非空标签，默认使用 LabelMaster V6"),
+            3000);
+        return true;
+    }
+
+    const LabelOutputFormat targetFormat = canonicalOutputFormat(currentDataSet);
+    struct PendingConversion {
+        QString labelPath;
+        QSize imageSize;
+        QVector<Armor> armors;
+    };
+    QVector<PendingConversion> conversions;
+
+    // First parse every source file. A malformed label therefore cannot be replaced
+    // with an empty or partially converted file.
+    QDirIterator iterator(pendingDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        const QString imagePath = iterator.next();
+        const QString labelPath = labelFileForImage(imagePath);
+        if (!QFile::exists(labelPath))
+            continue;
+
+        QImageReader reader(imagePath);
+        const QSize imageSize = reader.size();
+        if (imageSize.isEmpty()) {
+            emit busy(false);
+            emit status(tr("导入失败：无法读取图片尺寸 %1").arg(QFileInfo(imagePath).fileName()), 3000);
+            return false;
+        }
+
+        PendingConversion conversion{labelPath, imageSize, {}};
+        QString error;
+        if (!labelmaster::service::label_format::readLabelFile(
+                labelPath, imageSize, currentDataSet, conversion.armors, &error, poseScheme)) {
+            emit busy(false);
+            emit status(tr("导入失败：%1：%2").arg(QFileInfo(labelPath).fileName(), error), 5000);
+            LOGE(QString("导入失败：%1：%2").arg(labelPath, error));
+            return false;
+        }
+        conversions.push_back(conversion);
+    }
+
+    for (const PendingConversion& conversion : conversions) {
+        QString error;
+        if (!labelmaster::service::label_format::writeLabelFile(
+                conversion.labelPath, conversion.imageSize, targetFormat,
+                conversion.armors, &error, poseScheme)) {
+            emit busy(false);
+            emit status(
+                tr("导入写入失败：%1：%2")
+                    .arg(QFileInfo(conversion.labelPath).fileName(), error),
+                5000);
+            LOGE(QString("导入写入失败：%1：%2").arg(conversion.labelPath, error));
+            return false;
+        }
+    }
+
+    currentDataSet = targetFormat == LabelOutputFormat::LabelMasterV6
+        ? DataSet::LabelMasterV6
+        : DataSet::LabelMasterV4;
+    controller::AppSettings::instance().setoutputFormat(static_cast<int>(targetFormat));
+    emit status(
+        tr("自动识别为 %1；已将 %2 个标签转换为 %3")
+            .arg(labelmaster::service::label_format::dataSetName(detection.format))
+            .arg(conversions.size())
+            .arg(labelmaster::service::label_format::outputFormatName(targetFormat)),
+        3000);
+    return true;
+
+    // Legacy conversion path kept below only as unreachable reference while the
+    // surrounding file service is being decomposed.
+#if 0
     if (currentDataSet != DataSet::LabelMaster2) {                                 // 开始导入
         auto fail = [&](const QString& tip, const QString& arg) {
             emit busy(false);
@@ -570,6 +819,7 @@ bool FileService::tryImportDataSetAfterLoaded() {
         }
     }
     return true;
+#endif
 }
 void FileService::tryOpenFirstAfterLoaded(const QString& dir) {
     if (!setProxyRoot(dir)) {
@@ -648,6 +898,7 @@ void FileService::openPaths(const QStringList& paths) {
 
     QString dir;
     pendingTargetPath_.clear();
+    currentDataSet = DataSet::Auto;
 
     for (QString p : paths) {
         if (p.startsWith("file://")) {
@@ -673,7 +924,6 @@ void FileService::openPaths(const QStringList& paths) {
 
     if (!dir.isEmpty()) {
         openDir(dir);
-        QTimer::singleShot(0, this, [this, dir] { tryOpenFirstAfterLoaded(dir); });
     }
 }
 
@@ -705,36 +955,89 @@ void FileService::tryRestoreLastVisited() {
 // ---------- 标注 I/O（归一化格式 + 兼容旧像素格式） ----------
 QString FileService::labelFileForImage(const QString& imagePath) {
     QFileInfo fi(imagePath);
-    QDir labelDir;
-    if (controller::AppSettings::instance().saveDir().isEmpty()) {
-        // 支持 label 和 labels 两种目录名
-        QString parentPath = fi.absolutePath() + "/..";
-        QDir labelDirSingle(parentPath + "/label");
-        QDir labelDirPlural(parentPath + "/labels");
+    const QString configuredDir = controller::AppSettings::instance().saveDir().trimmed();
+    const QDir imageDir(fi.absolutePath());
+    const QDir imageParent(QDir::cleanPath(imageDir.filePath(QStringLiteral(".."))));
+    const QString labelFileName = fi.completeBaseName() + QStringLiteral(".txt");
 
-        // 优先使用已存在的目录，如果都不存在则使用 label
-        if (labelDirPlural.exists()) {
-            labelDir = labelDirPlural;
-        } else if (labelDirSingle.exists()) {
-            labelDir = labelDirSingle;
+    auto defaultDirs = [&](const QString& name) {
+        return QStringList{
+            QDir::cleanPath(imageParent.filePath(name)),
+            QDir::cleanPath(imageDir.filePath(name)),
+        };
+    };
+    auto labelPathIn = [&](const QString& dirPath) {
+        return QDir::cleanPath(QDir(dirPath).absoluteFilePath(labelFileName));
+    };
+
+    if (configuredDir.isEmpty()
+        || configuredDir == QStringLiteral("label")
+        || configuredDir == QStringLiteral("labels")) {
+        QStringList candidateDirs;
+        if (configuredDir == QStringLiteral("labels")) {
+            candidateDirs << defaultDirs(QStringLiteral("labels"))
+                          << defaultDirs(QStringLiteral("label"));
+        } else if (configuredDir == QStringLiteral("label")) {
+            candidateDirs << defaultDirs(QStringLiteral("label"))
+                          << defaultDirs(QStringLiteral("labels"));
         } else {
-            labelDir = labelDirSingle;  // 默认使用 label
+            candidateDirs << defaultDirs(QStringLiteral("labels"))
+                          << defaultDirs(QStringLiteral("label"));
         }
-    } else {
-        // 绝对路径
-        labelDir = QDir(controller::AppSettings::instance().saveDir());
-        if (!labelDir.isAbsolute()) {
-            // 相对路径
-            labelDir = QDir(fi.absolutePath() + "/../" + labelDir.path());
+
+        for (const QString& dirPath : candidateDirs) {
+            const QString candidate = labelPathIn(dirPath);
+            if (QFile::exists(candidate))
+                return candidate;
         }
+        for (const QString& dirPath : candidateDirs) {
+            if (QFileInfo(dirPath).isDir())
+                return labelPathIn(dirPath);
+        }
+
+        const QString fallbackName = configuredDir == QStringLiteral("labels")
+            ? QStringLiteral("labels")
+            : QStringLiteral("label");
+        return labelPathIn(imageParent.filePath(fallbackName));
     }
 
-    const QString dirPath = QDir::cleanPath(labelDir.absolutePath());
-    return dirPath + "/" + fi.completeBaseName() + ".txt";
+    QDir labelDir(configuredDir);
+    if (labelDir.isAbsolute())
+        return labelPathIn(labelDir.absolutePath());
+
+    const QString parentCandidate = QDir::cleanPath(imageParent.filePath(configuredDir));
+    const QString imageDirCandidate = QDir::cleanPath(imageDir.filePath(configuredDir));
+    const QString parentLabelPath = labelPathIn(parentCandidate);
+    const QString imageDirLabelPath = labelPathIn(imageDirCandidate);
+    if (QFile::exists(parentLabelPath))
+        return parentLabelPath;
+    if (QFile::exists(imageDirLabelPath))
+        return imageDirLabelPath;
+    if (QFileInfo(parentCandidate).isDir())
+        return parentLabelPath;
+    if (QFileInfo(imageDirCandidate).isDir())
+        return imageDirLabelPath;
+    return parentLabelPath;
 }
 
 bool FileService::writeLabelFile(
     const QString& labelPath, const QVector<Armor>& armors, const QSize& imgSize) {
+    const int configured = controller::AppSettings::instance().outputFormat();
+    const LabelOutputFormat format = configured >= static_cast<int>(LabelOutputFormat::Points11)
+            && configured <= static_cast<int>(LabelOutputFormat::LabelMasterV6)
+        ? static_cast<LabelOutputFormat>(configured)
+        : LabelOutputFormat::LabelMasterV6;
+    const PoseClassScheme poseScheme = controller::AppSettings::instance().v6ClassScheme() == 14
+        ? PoseClassScheme::Classes14
+        : PoseClassScheme::Classes36;
+    QString error;
+    const bool written = labelmaster::service::label_format::writeLabelFile(
+        labelPath, imgSize, format, armors, &error, poseScheme);
+    if (!written)
+        LOGE(QString("标签写入失败：%1：%2").arg(labelPath, error));
+    return written;
+
+#if 0
     if (imgSize.width() <= 0 || imgSize.height() <= 0)
         return false;
 
@@ -917,9 +1220,26 @@ bool FileService::writeLabelFile(
     ts.flush();
     // File closed by destructor
     return true;
+#endif
 }
 
-QVector<Armor> FileService::readLabelFile(const QString& labelPath, const QSize& imgSize) {
+QVector<Armor> FileService::readLabelFile(
+    const QString& labelPath, const QSize& imgSize, DataSet format) {
+    {
+        QVector<Armor> parsed;
+        QString error;
+        if (!labelmaster::service::label_format::readLabelFile(
+                labelPath, imgSize, format, parsed, &error,
+                controller::AppSettings::instance().v6ClassScheme() == 14
+                    ? PoseClassScheme::Classes14
+                    : PoseClassScheme::Classes36)) {
+            LOGE(QString("标签读取失败：%1：%2").arg(labelPath, error));
+            return {};
+        }
+        return parsed;
+    }
+
+#if 0
     QVector<Armor> res;
     QFile f(labelPath);
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
@@ -1089,6 +1409,7 @@ QVector<Armor> FileService::readLabelFile(const QString& labelPath, const QSize&
         res.push_back(a);
     }
     return res;
+#endif
 }
 
 // ---------- 保存标注（对外槽） ----------
@@ -1153,6 +1474,26 @@ void FileService::getStas(int colorId, int classId, int sizeId) {
         QString imgPath = fsModel_->filePath(fsModel_->index(i, 0, mapFromProxyToSource(parent)));
         const QString labelPath = labelFileForImage(imgPath);
         if (QFile::exists(labelPath)) {
+            QImageReader reader(imgPath);
+            const QVector<Armor> armors = readLabelFile(labelPath, reader.size(), currentDataSet);
+            for (const Armor& armor : armors) {
+                const int colId = IdConvert::colorLetter2Id(armor.color);
+                const int sId = armor.size;
+                const int clsId = IdConvert::classToken2Id(
+                    IdConvert::normalizeClasslToken(armor.cls));
+                const auto matches = [](int value, int target) {
+                    return target == -1 || value == target;
+                };
+                if (matches(colId, colorId) && matches(sId, sizeId)
+                    && matches(clsId, classId)) {
+                    ++targetCount;
+                    hasTarget = true;
+                }
+            }
+            if (hasTarget)
+                ++fileCount;
+            continue;
+
             QFile file(labelPath);
             if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
                 QTextStream ts(&file);

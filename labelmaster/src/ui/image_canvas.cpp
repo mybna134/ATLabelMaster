@@ -3,8 +3,8 @@
 #include "../util/id_convert.hpp"
 #include "../util/svg_constants.hpp"
 #include "controller/settings.hpp"
+#include "dataset/dataset.h"
 #include "info_dialog.h"
-#include "mainwindow.hpp"
 #include <QDebug>
 #include <QFile>
 #include <QInputDialog>
@@ -54,6 +54,13 @@ static QPointF fromJsonPt(const QJsonArray& a) {
 static QJsonObject armorToJson(const Armor& a) {
     QJsonObject o;
     o["cls"] = a.cls;
+    o["color"] = a.color;
+    o["size"] = a.size;
+    o["left_visible"] = a.leftVisible;
+    o["right_visible"] = a.rightVisible;
+    o["keypoint_visibility"] = QJsonArray{
+        a.keypointVisibility[0], a.keypointVisibility[1],
+        a.keypointVisibility[2], a.keypointVisibility[3]};
     o["p0"]  = toJsonPt(a.p0);
     o["p1"]  = toJsonPt(a.p1);
     o["p2"]  = toJsonPt(a.p2);
@@ -66,6 +73,15 @@ static bool armorFromJson(const QJsonObject& o, Armor& a) {
         || !o.contains("p3"))
         return false;
     a.cls = o.value("cls").toString();
+    a.color = o.value("color").toString("G");
+    a.size = o.value("size").toInt();
+    a.leftVisible = o.value("left_visible").toBool(true);
+    a.rightVisible = o.value("right_visible").toBool(true);
+    const QJsonArray visibility = o.value("keypoint_visibility").toArray();
+    if (visibility.size() == 4) {
+        for (int i = 0; i < 4; ++i)
+            a.keypointVisibility[i] = visibility[i].toInt(2);
+    }
     a.p0  = fromJsonPt(o.value("p0").toArray());
     a.p1  = fromJsonPt(o.value("p1").toArray());
     a.p2  = fromJsonPt(o.value("p2").toArray());
@@ -260,12 +276,17 @@ bool ImageCanvas::setSelectedClass(const QString& cls) {
     update();
     return true;
 }
-bool ImageCanvas::setSelectedInfo(const QString& cls, const QString& color, const int& size) {
+bool ImageCanvas::setSelectedInfo(
+    const QString& cls, const QString& color, const int& size,
+    int vis0, int vis1, int vis2, int vis3) {
     if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size())
         return false;
     dets_[selectedIndex_].size  = size;
     dets_[selectedIndex_].color = color.isEmpty() ? "Gray" : color;
     dets_[selectedIndex_].cls   = cls.isEmpty() ? QStringLiteral("unknown") : cls;
+    dets_[selectedIndex_].keypointVisibility = {vis0, vis1, vis2, vis3};
+    dets_[selectedIndex_].leftVisible = vis0 > 0 || vis1 > 0;
+    dets_[selectedIndex_].rightVisible = vis2 > 0 || vis3 > 0;
     // 尺寸变化会影响BBox计算（不同尺寸使用不同SVG锚点），重新计算
     updateBBoxFromCorners(dets_[selectedIndex_]);
     emit detectionUpdated(selectedIndex_, dets_[selectedIndex_]);
@@ -730,6 +751,9 @@ void ImageCanvas::createNewDetection() { // 画框
     a.cls         = currentClass_.isEmpty() ? QStringLiteral("unknown") : currentClass_;
     a.color       = currentColor_.isEmpty() ? QStringLiteral("G") : currentColor_;
     a.size        = currentSize_;
+    a.keypointVisibility = currentKeypointVisibility_;
+    a.leftVisible = a.keypointVisibility[0] > 0 || a.keypointVisibility[1] > 0;
+    a.rightVisible = a.keypointVisibility[2] > 0 || a.keypointVisibility[3] > 0;
     currentColor_ = "";
     // 自动计算归一化BBox
     updateBBoxFromCorners(a);
@@ -1098,12 +1122,23 @@ void ImageCanvas::promptEditSelectedInfo(bool isCurrent) {
     //     setSelectedClass(cls.trimmed());
     ui::InfoDialog* dialog = new ui::InfoDialog(this);
     connect(dialog, &ui::InfoDialog::InfoGetted, this, &ImageCanvas::ProcessInfoChanged);
+    const bool visibilitySupported =
+        controller::AppSettings::instance().outputFormat()
+        == static_cast<int>(LabelOutputFormat::LabelMasterV6);
+    const bool pose14Classes = controller::AppSettings::instance().v6ClassScheme() == 14;
     if (isCurrent) {
-        dialog->updateInfo(true);
+        dialog->updateInfo(
+            true, 0, 0, 0, visibilitySupported,
+            currentKeypointVisibility_[0], currentKeypointVisibility_[1],
+            currentKeypointVisibility_[2], currentKeypointVisibility_[3], pose14Classes);
     } else {
         dialog->updateInfo(
             false, IdConvert::classToken2Id(dets_[selectedIndex_].cls),
-            IdConvert::colorLetter2Id(dets_[selectedIndex_].color), dets_[selectedIndex_].size);
+            IdConvert::colorLetter2Id(dets_[selectedIndex_].color), dets_[selectedIndex_].size,
+            visibilitySupported, dets_[selectedIndex_].keypointVisibility[0],
+            dets_[selectedIndex_].keypointVisibility[1],
+            dets_[selectedIndex_].keypointVisibility[2],
+            dets_[selectedIndex_].keypointVisibility[3], pose14Classes);
     }
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->show();
@@ -1248,13 +1283,15 @@ void ImageCanvas::requestSave() {
     emit annotationsPublished(dets_, raw_img, !maskRects_.isEmpty());
 }
 void ImageCanvas::ProcessInfoChanged(
-    const QString& EditedClass, const QString& Color, const int& size = 0, bool isCurrent = false) {
+    const QString& EditedClass, const QString& Color, const int& size,
+    int vis0, int vis1, int vis2, int vis3, bool isCurrent) {
     if (isCurrent) {
         currentClass_ = EditedClass;
         currentColor_ = Color;
         currentSize_  = size;
+        currentKeypointVisibility_ = {vis0, vis1, vis2, vis3};
         createNewDetection();
     } else {
-        setSelectedInfo(EditedClass.trimmed(), Color, size);
+        setSelectedInfo(EditedClass.trimmed(), Color, size, vis0, vis1, vis2, vis3);
     }
 }

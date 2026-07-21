@@ -4,6 +4,16 @@ All notable changes to ATLabelMaster will be documented in this file.
 
 ## [Unreleased]
 
+### Added - LabelMaster V6
+- Added LabelMaster V6 as the default label format, compatible with the 17-field YOLO Pose layout.
+- Added per-keypoint `0/2` visibility editing; the controls are shown only for V6 and the reader remains compatible with `1`.
+- Added `rm_label_tool.py` compatible 14/36-class parsing and dataset-level scheme detection.
+- Added direct, non-converting V4/V6 opening and safe automatic legacy-format normalization.
+- V5 and other visibility-aware inputs normalize to V6; inputs without visibility normalize to V4.
+- Added strict line validation and atomic label replacement to prevent malformed imports from clearing labels.
+- Added dataset-wide automatic format detection and removed manual input/output conversion controls.
+- Added safe conflict rejection plus a title-bar `?` dialog describing every supported format.
+
 ### Added - Pixel Art UI System
 - **Theme Manager** - Complete theme system with JSON configuration
 - **Three Themes**

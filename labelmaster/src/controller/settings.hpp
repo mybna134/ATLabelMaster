@@ -69,7 +69,7 @@ public:
     APP_SETTING_RW_FLOAT(vRate, Keys::kvRate, Def::kVRate)
     APP_SETTING_RW_STR(theme, Keys::kTheme, Def::kTheme)
     APP_SETTING_RW_INT(outputFormat, Keys::kOutputFormat, Def::kOutputFormat)
-    APP_SETTING_RW_INT(importFormat, Keys::kImportFormat, Def::kImportFormat)
+    APP_SETTING_RW_INT(v6ClassScheme, Keys::kV6ClassScheme, Def::kV6ClassScheme)
 
 #undef APP_SETTING_RW_STR
 #undef APP_SETTING_RW_INT
@@ -98,10 +98,10 @@ private:
         static constexpr const char* kNumberClassifierThreshold = "detector/tradition/threshold";
         static constexpr const char* kTheme                     = "ui/theme";
         static constexpr const char* kOutputFormat              = "dataset/outputFormat";
-        static constexpr const char* kImportFormat              = "dataset/importFormat";
+        static constexpr const char* kV6ClassScheme             = "dataset/v6ClassScheme";
     };
     struct Def {
-        static constexpr const char* kSaveDir             = "label";
+        static constexpr const char* kSaveDir             = ""; // 自动复用同级 labels/，否则使用 label/
         static constexpr const char* kAssetsDir           = "/usr/opt/LabelMaster/assets"; //应用启动时会自动设置当前Application目录
         static constexpr bool kAutoSave                   = false;
         static constexpr bool kAutoEnhanceV               = false;
@@ -111,8 +111,8 @@ private:
         static constexpr float kNumberClassifierThreshold = 80.f;
         static constexpr const float kVRate               = 4;
         static constexpr const char* kTheme               = "retro";
-        static constexpr const int kOutputFormat          = 0;  // 0=pts-only(11), 1=xywh+pts(15)
-        static constexpr const int kImportFormat          = 0;  // 0=LabelMasterV2, 1=LabelMasterV1, 2=LabelMasterV3, 3=HITSZ, 4=UPC, 5=NMPU
+        static constexpr const int kOutputFormat          = 3;  // LabelMaster V6 / YOLO Pose
+        static constexpr const int kV6ClassScheme         = 36;
     };
 
     QSettings settings_;

@@ -201,6 +201,18 @@ User clicks "Smart Detect"
 
 ### Label File Format
 
+#### LabelMasterV6 / YOLO Pose Format (17 fields, default)
+```
+class_id center_x center_y width height x0 y0 v0 x1 y1 v1 x2 y2 v2 x3 y3 v3
+```
+- All coordinates are normalized to `[0, 1]`
+- Point order is `TL, BL, BR, TR`
+- The editor writes per-keypoint visibility as `0=invisible` or `2=visible`; reading remains compatible with `1`
+- `class_id` supports the 14-class and 36-class schemes from `rm_label_tool.py`
+- V6 is the only output format that exposes per-keypoint visibility controls
+- Dataset format is detected from every non-empty label file; ambiguous or mixed datasets are rejected without writes
+- V6 and V4 are opened directly; V5 is imported to V6 and all other legacy formats to V4
+
 #### LabelMaster2 Format (11 fields)
 ```
 color size cls x0 y0 x1 y1 x2 y2 x3 y3
@@ -212,10 +224,10 @@ color size cls x0 y0 x1 y1 x2 y2 x3 y3
 ```
 cls x_c y_c w h x0 y0 x1 y1 x2 y2 x3 y3
 ```
-- `cls`: Class token (e.g., "R1", "B2", "G3") - color * size * num
+- `cls`: Numeric class id encoded as `color * 16 + size * 8 + class`
 - `x_c,y_c,w,h`: Normalized bounding box (center format) [0,1]
 - `x0,y0,x1,y1,x2,y2,x3,y3`: Normalized four corner points [0,1]
-- Size is determined from bbox aspect ratio (threshold: 2.5)
+- `color = cls / 16`, `size = (cls % 16) / 8`, `class = cls % 8`
 
 #### Extended Format (15 fields)
 ```
@@ -227,9 +239,10 @@ color size cls x y w h x0 y0 x1 y1 x2 y2 x3 y3
 ### Armor Structure
 ```cpp
 struct Armor {
-    QString cls;      // Class token (e.g., "R1", "B2", "G3")
+    QString cls;      // Internal class token: G/1/2/3/4/5/O/B
     QString color;    // Color letter (R/B/G/P)
     int size;         // 0=small, 1=big
+    std::array<int, 4> keypointVisibility;  // V6 TL/BL/BR/TR; editor uses 0/2
     QPointF p0, p1, p2, p3;  // Corner points (TL, BL, BR, TR)
     double norm_x, norm_y, norm_w, norm_h;  // Normalized bbox (optional)
 };
