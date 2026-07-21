@@ -131,7 +131,8 @@ inline bool InitLabelInfo(
         return false;
     }
     for (int i = posStart; i < posStart + 8; i++) {
-        if (std::fabs(label.at(i).toDouble(&ok)) > 1.5) {
+        const double coordinate = label.at(i).toDouble(&ok);
+        if (!ok || !std::isfinite(coordinate)) {
             return false;
         }
     }

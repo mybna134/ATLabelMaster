@@ -21,6 +21,7 @@
 #include <QImageReader>
 #include <QMessageBox>
 #include <QQueue>
+#include <QProgressDialog>
 #include <QSettings>
 #include <QSortFilterProxyModel>
 #include <cstdio>
@@ -56,6 +57,7 @@
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWhatsThis>
+#include <QEventLoop>
 
 #include <algorithm>
 #include <cmath>
@@ -126,7 +128,7 @@ QString imageDirectoryFromParent(const QString& parentPath) {
 QString formatHelpHtml() {
     return QStringLiteral(
         "<h2>支持的标签格式</h2>"
-        "<p>坐标均可为归一化值；<code>pts</code> 的点序为 TL、BL、BR、TR。</p>"
+        "<p>坐标均为归一化值；bbox 和关键点均允许越过图像边界，<code>pts</code> 的点序为 TL、BL、BR、TR。</p>"
         "<table cellspacing='8'>"
         "<tr><th align='left'>格式</th><th align='left'>字段布局</th><th align='left'>自动处理</th></tr>"
         "<tr><td>V1（10）</td><td><code>color class pts[4]</code></td><td>转 V4；与部分 UPC 数据不可区分</td></tr>"
@@ -514,12 +516,46 @@ bool FileService::setProxyRoot(const QString& dir) {
 }
 bool FileService::tryImportDataSetAfterLoaded() {
     formatDetectionAttempted_ = true;
+
+    QProgressDialog progressDialog(QApplication::activeWindow());
+    progressDialog.setWindowTitle(tr("数据集格式"));
+    progressDialog.setLabelText(tr("正在扫描图片..."));
+    progressDialog.setCancelButton(nullptr);
+    progressDialog.setRange(0, 0);
+    progressDialog.setMinimumDuration(0);
+    progressDialog.setAutoClose(false);
+    progressDialog.setAutoReset(false);
+    progressDialog.setWindowModality(Qt::ApplicationModal);
+    progressDialog.show();
+
+    const auto refreshProgress = [] {
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    };
+    const auto closeProgress = [&] {
+        progressDialog.close();
+        refreshProgress();
+    };
+    const auto updateProgress = [&](const QString& text, int current, int total) {
+        const int maximum = total > 0 ? total : 1;
+        progressDialog.setRange(0, maximum);
+        progressDialog.setValue(total > 0 ? std::clamp(current, 0, total) : maximum);
+        progressDialog.setLabelText(tr("%1 %2/%3").arg(text).arg(current).arg(total));
+        refreshProgress();
+    };
+
     QVector<labelmaster::service::label_format::LabelFileSample> samples;
     QSet<QString> visitedLabels;
     QDirIterator detectionIterator(
         pendingDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+    int scannedImages = 0;
     while (detectionIterator.hasNext()) {
         const QString imagePath = detectionIterator.next();
+        ++scannedImages;
+        if (scannedImages % 25 == 0) {
+            progressDialog.setLabelText(tr("正在扫描图片 %1").arg(scannedImages));
+            refreshProgress();
+        }
+
         const QString labelPath = labelFileForImage(imagePath);
         if (!QFile::exists(labelPath) || visitedLabels.contains(labelPath))
             continue;
@@ -528,6 +564,7 @@ bool FileService::tryImportDataSetAfterLoaded() {
         QImageReader reader(imagePath);
         const QSize imageSize = reader.size();
         if (imageSize.isEmpty()) {
+            closeProgress();
             emit busy(false);
             emit status(
                 tr("格式识别失败：无法读取图片尺寸 %1").arg(QFileInfo(imagePath).fileName()),
@@ -537,8 +574,14 @@ bool FileService::tryImportDataSetAfterLoaded() {
         samples.push_back({labelPath, imageSize});
     }
 
-    const auto detection = labelmaster::service::label_format::detectDataSetFormat(samples);
+    const int sampleCount = static_cast<int>(samples.size());
+    updateProgress(tr("正在验证数据集格式"), 0, sampleCount);
+    const auto detection = labelmaster::service::label_format::detectDataSetFormat(
+        samples, [&](int current, int total) {
+            updateProgress(tr("正在验证数据集格式"), current, total);
+        });
     if (!detection.succeeded()) {
+        closeProgress();
         emit busy(false);
         emit status(tr("标签格式冲突，未修改任何标签"), 5000);
         FormatConflictMessageBox dialog(detection, QApplication::activeWindow());
@@ -561,6 +604,7 @@ bool FileService::tryImportDataSetAfterLoaded() {
                       .arg(labelmaster::service::label_format::dataSetName(currentDataSet))
                 : tr("未发现非空标签，默认使用 LabelMaster V6"),
             3000);
+        closeProgress();
         return true;
     }
 
@@ -575,15 +619,19 @@ bool FileService::tryImportDataSetAfterLoaded() {
     // First parse every source file. A malformed label therefore cannot be replaced
     // with an empty or partially converted file.
     QDirIterator iterator(pendingDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+    QSet<QString> conversionLabels;
+    int parsedLabels = 0;
     while (iterator.hasNext()) {
         const QString imagePath = iterator.next();
         const QString labelPath = labelFileForImage(imagePath);
-        if (!QFile::exists(labelPath))
+        if (!QFile::exists(labelPath) || conversionLabels.contains(labelPath))
             continue;
+        conversionLabels.insert(labelPath);
 
         QImageReader reader(imagePath);
         const QSize imageSize = reader.size();
         if (imageSize.isEmpty()) {
+            closeProgress();
             emit busy(false);
             emit status(tr("导入失败：无法读取图片尺寸 %1").arg(QFileInfo(imagePath).fileName()), 3000);
             return false;
@@ -593,19 +641,25 @@ bool FileService::tryImportDataSetAfterLoaded() {
         QString error;
         if (!labelmaster::service::label_format::readLabelFile(
                 labelPath, imageSize, currentDataSet, conversion.armors, &error, poseScheme)) {
+            closeProgress();
             emit busy(false);
             emit status(tr("导入失败：%1：%2").arg(QFileInfo(labelPath).fileName(), error), 5000);
             LOGE(QString("导入失败：%1：%2").arg(labelPath, error));
             return false;
         }
         conversions.push_back(conversion);
+        ++parsedLabels;
+        updateProgress(tr("正在转换数据集格式"), parsedLabels, sampleCount);
     }
 
+    const int conversionCount = static_cast<int>(conversions.size());
+    int writtenLabels = 0;
     for (const PendingConversion& conversion : conversions) {
         QString error;
         if (!labelmaster::service::label_format::writeLabelFile(
                 conversion.labelPath, conversion.imageSize, targetFormat,
                 conversion.armors, &error, poseScheme)) {
+            closeProgress();
             emit busy(false);
             emit status(
                 tr("导入写入失败：%1：%2")
@@ -614,6 +668,8 @@ bool FileService::tryImportDataSetAfterLoaded() {
             LOGE(QString("导入写入失败：%1：%2").arg(conversion.labelPath, error));
             return false;
         }
+        ++writtenLabels;
+        updateProgress(tr("正在写入转换结果"), writtenLabels, conversionCount);
     }
 
     currentDataSet = targetFormat == LabelOutputFormat::LabelMasterV6
@@ -626,6 +682,7 @@ bool FileService::tryImportDataSetAfterLoaded() {
             .arg(conversions.size())
             .arg(labelmaster::service::label_format::outputFormatName(targetFormat)),
         3000);
+    closeProgress();
     return true;
 
     // Legacy conversion path kept below only as unreachable reference while the

@@ -205,7 +205,7 @@ User clicks "Smart Detect"
 ```
 class_id center_x center_y width height x0 y0 v0 x1 y1 v1 x2 y2 v2 x3 y3 v3
 ```
-- All coordinates are normalized to `[0, 1]`
+- Bounding boxes and keypoints use unbounded finite normalized coordinates; bbox width/height remain non-negative
 - Point order is `TL, BL, BR, TR`
 - The editor writes per-keypoint visibility as `0=invisible` or `2=visible`; reading remains compatible with `1`
 - `class_id` supports the 14-class and 36-class schemes from `rm_label_tool.py`
@@ -217,7 +217,7 @@ class_id center_x center_y width height x0 y0 v0 x1 y1 v1 x2 y2 v2 x3 y3 v3
 ```
 color size cls x0 y0 x1 y1 x2 y2 x3 y3
 ```
-- All coordinates normalized to [0, 1]
+- Corner points use normalized coordinates and may lie outside [0, 1]
 - `x0,y0,x1,y1,x2,y2,x3,y3`: Four corner points (TL, BL, BR, TR)
 
 #### LabelMasterV4 Format (13 fields)
@@ -225,8 +225,8 @@ color size cls x0 y0 x1 y1 x2 y2 x3 y3
 cls x_c y_c w h x0 y0 x1 y1 x2 y2 x3 y3
 ```
 - `cls`: Numeric class id encoded as `color * 16 + size * 8 + class`
-- `x_c,y_c,w,h`: Normalized bounding box (center format) [0,1]
-- `x0,y0,x1,y1,x2,y2,x3,y3`: Normalized four corner points [0,1]
+- `x_c,y_c,w,h`: Normalized bounding box; center/extent may cross the image boundary
+- `x0,y0,x1,y1,x2,y2,x3,y3`: Normalized four corner points; out-of-image values are preserved
 - `color = cls / 16`, `size = (cls % 16) / 8`, `class = cls % 8`
 
 #### Extended Format (15 fields)
@@ -234,7 +234,7 @@ cls x_c y_c w h x0 y0 x1 y1 x2 y2 x3 y3
 color size cls x y w h x0 y0 x1 y1 x2 y2 x3 y3
 ```
 - Adds bounding box: `x,y,w,h` (center x, center y, width, height)
-- Coordinates normalized to [0, 1]
+- Bounding boxes and corner points may cross the image boundary
 
 ### Armor Structure
 ```cpp
@@ -261,7 +261,7 @@ struct Armor {
 - Used for: Rendering, mouse input
 
 ### Normalized Coordinates
-- Range: [0, 1]
+- Bbox and keypoint positions are unbounded finite normalized values; bbox width/height are non-negative
 - Used for: Label file storage
 - Transform: `normalized = image_pixel / image_size`
 

@@ -34,7 +34,7 @@ bool LabelMaster2Format::read(
         armor.size = parts[1].toInt();
         armor.cls = IdConvert::idCollect2Token(parts[2].toInt());
 
-        // Denormalize coordinates from [0,1] to pixel coords
+        // Denormalize coordinates; values outside [0,1] remain outside the image.
         armor.p0 = QPointF(parts[3].toDouble() * W, parts[4].toDouble() * H);
         armor.p1 = QPointF(parts[5].toDouble() * W, parts[6].toDouble() * H);
         armor.p2 = QPointF(parts[7].toDouble() * W, parts[8].toDouble() * H);
@@ -58,7 +58,7 @@ bool LabelMaster2Format::write(
         const int colorId = IdConvert::colorLetter2Id(armor.color);
         const int classId = IdConvert::classToken2Id(armor.cls);
 
-        // Normalize to [0,1]
+        // Normalize without clipping; keypoints may lie outside the image.
         QPointF q0(armor.p0.x() / W, armor.p0.y() / H);
         QPointF q1(armor.p1.x() / W, armor.p1.y() / H);
         QPointF q2(armor.p2.x() / W, armor.p2.y() / H);
@@ -242,23 +242,12 @@ bool ExtendedFormat::write(
             y = (min_y + max_y) / (2.0 * H);
         }
 
-        // Clamp to [0,1]
-        auto clamp01 = [](double v) { return std::clamp(v, 0.0, 1.0); };
-        x = clamp01(x);
-        y = clamp01(y);
-        w = clamp01(w);
-        h = clamp01(h);
-        QPointF q0_clamped(clamp01(q0.x()), clamp01(q0.y()));
-        QPointF q1_clamped(clamp01(q1.x()), clamp01(q1.y()));
-        QPointF q2_clamped(clamp01(q2.x()), clamp01(q2.y()));
-        QPointF q3_clamped(clamp01(q3.x()), clamp01(q3.y()));
-
         stream << colorId << ' ' << armor.size << ' ' << classId << ' '
                << x << ' ' << y << ' ' << w << ' ' << h << ' '
-               << q0_clamped.x() << ' ' << q0_clamped.y() << ' '
-               << q1_clamped.x() << ' ' << q1_clamped.y() << ' '
-               << q2_clamped.x() << ' ' << q2_clamped.y() << ' '
-               << q3_clamped.x() << ' ' << q3_clamped.y() << '\n';
+               << q0.x() << ' ' << q0.y() << ' '
+               << q1.x() << ' ' << q1.y() << ' '
+               << q2.x() << ' ' << q2.y() << ' '
+               << q3.x() << ' ' << q3.y() << '\n';
     }
 
     return true;
@@ -353,7 +342,7 @@ bool LabelMasterV4Format::write(
             q3 = QPointF(armor.p3.x() / W, armor.p3.y() / H);
         }
 
-        // SVG rectangle corners (normalized to [0,1])
+        // SVG rectangle corners (normalized coordinate space)
         QPolygonF svg_quad;
         svg_quad << QPointF(0., 0.)
                  << QPointF(0., svgTemplate.height)
@@ -397,23 +386,12 @@ bool LabelMasterV4Format::write(
             y = (y_min + y_max) / 2.0;
         }
 
-        // Clamp to [0,1]
-        auto clamp01 = [](double v) { return std::clamp(v, 0.0, 1.0); };
-        x = clamp01(x);
-        y = clamp01(y);
-        w = clamp01(w);
-        h = clamp01(h);
-        QPointF q0_clamped(clamp01(q0.x()), clamp01(q0.y()));
-        QPointF q1_clamped(clamp01(q1.x()), clamp01(q1.y()));
-        QPointF q2_clamped(clamp01(q2.x()), clamp01(q2.y()));
-        QPointF q3_clamped(clamp01(q3.x()), clamp01(q3.y()));
-
         // Write bbox (center format) and corner points
         stream << x << ' ' << y << ' ' << w << ' ' << h << ' '
-               << q0_clamped.x() << ' ' << q0_clamped.y() << ' '
-               << q1_clamped.x() << ' ' << q1_clamped.y() << ' '
-               << q2_clamped.x() << ' ' << q2_clamped.y() << ' '
-               << q3_clamped.x() << ' ' << q3_clamped.y() << '\n';
+               << q0.x() << ' ' << q0.y() << ' '
+               << q1.x() << ' ' << q1.y() << ' '
+               << q2.x() << ' ' << q2.y() << ' '
+               << q3.x() << ' ' << q3.y() << '\n';
     }
 
     return true;

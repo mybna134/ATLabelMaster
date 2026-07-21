@@ -13,6 +13,7 @@ All notable changes to ATLabelMaster will be documented in this file.
 - Added strict line validation and atomic label replacement to prevent malformed imports from clearing labels.
 - Added dataset-wide automatic format detection and removed manual input/output conversion controls.
 - Added safe conflict rejection plus a title-bar `?` dialog describing every supported format.
+- Allowed keypoints and bbox values outside the image range; negative/out-of-range label values are preserved during reading and conversion. Masks remain clipped to the image.
 
 ### Added - Pixel Art UI System
 - **Theme Manager** - Complete theme system with JSON configuration

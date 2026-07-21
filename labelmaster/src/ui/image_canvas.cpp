@@ -338,11 +338,10 @@ void ImageCanvas::updateBBoxFromCorners(Armor& a) const {
 
         // 转换为归一化坐标: 中心点x, 中心点y, 宽度, 高度
         if (W > 0 && H > 0) {
-            auto clamp01 = [](double v) { return std::clamp(v, 0.0, 1.0); };
-            a.norm_w = clamp01((max_x - min_x) / W);
-            a.norm_h = clamp01((max_y - min_y) / H);
-            a.norm_x = clamp01((min_x + max_x) / (2.0 * W));
-            a.norm_y = clamp01((min_y + max_y) / (2.0 * H));
+            a.norm_w = (max_x - min_x) / W;
+            a.norm_h = (max_y - min_y) / H;
+            a.norm_x = (min_x + max_x) / (2.0 * W);
+            a.norm_y = (min_y + max_y) / (2.0 * H);
         }
     } else {
         // 透视变换失败，使用锚点的边界框作为后备
@@ -351,11 +350,10 @@ void ImageCanvas::updateBBoxFromCorners(Armor& a) const {
         double max_x = std::max({a.p0.x(), a.p1.x(), a.p2.x(), a.p3.x()});
         double max_y = std::max({a.p0.y(), a.p1.y(), a.p2.y(), a.p3.y()});
         if (W > 0 && H > 0) {
-            auto clamp01 = [](double v) { return std::clamp(v, 0.0, 1.0); };
-            a.norm_w = clamp01((max_x - min_x) / W);
-            a.norm_h = clamp01((max_y - min_y) / H);
-            a.norm_x = clamp01((min_x + max_x) / (2.0 * W));
-            a.norm_y = clamp01((min_y + max_y) / (2.0 * H));
+            a.norm_w = (max_x - min_x) / W;
+            a.norm_h = (max_y - min_y) / H;
+            a.norm_x = (min_x + max_x) / (2.0 * W);
+            a.norm_y = (min_y + max_y) / (2.0 * H);
         }
     }
 }
@@ -385,7 +383,8 @@ void ImageCanvas::drawDragRect(QPainter& p) const {
         return;
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
-    p.setClipRect(imageRectOnWidget());
+    if (isMaskMode)
+        p.setClipRect(imageRectOnWidget());
 
     const QRect rw = QRect(
                          imageToWidget(dragRectImg_.topLeft()).toPoint(),
@@ -426,15 +425,15 @@ void ImageCanvas::drawDetections(QPainter& p) const {
         return;
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
-    p.setClipRect(imageRectOnWidget());
 
     // 使用集中管理的颜色映射
     auto colorOf = [](const QString& c) -> QColor {
         return labelmaster::util::ColorMapper::colorForLetter(c);
     };
 
-    // 检查是否使用15字段格式 (Rect + Points)
-    bool showRectOverlay = controller::AppSettings::instance().outputFormat() == 1;
+    // 除纯角点旧格式外，显示保存于标签中的 bbox。
+    const int outputFormat = controller::AppSettings::instance().outputFormat();
+    const bool showRectOverlay = outputFormat != static_cast<int>(LabelOutputFormat::Points11);
     const double W = img_.width();
     const double H = img_.height();
 
@@ -453,7 +452,7 @@ void ImageCanvas::drawDetections(QPainter& p) const {
             QRectF rectImg;
 
             // 优先使用文件中存储的归一化 bbox 值
-            if (d.norm_x >= 0) {
+            if (d.norm_w >= 0 && d.norm_h >= 0) {
                 // 从归一化坐标转换为像素坐标
                 double cx = d.norm_x * W;
                 double cy = d.norm_y * H;
@@ -742,7 +741,7 @@ void ImageCanvas::mousePressEvent(QMouseEvent* e) {
     }
 }
 void ImageCanvas::createNewDetection() { // 画框
-    const QRect r = clampRectToImage(dragRectImg_.normalized());
+    const QRect r = dragRectImg_.normalized();
     Armor a;
     a.p0          = QPointF(r.left(), r.top());
     a.p1          = QPointF(r.left(), r.bottom());
@@ -771,16 +770,17 @@ void ImageCanvas::mouseReleaseEvent(QMouseEvent* e) {
         if (draggingRect_) {
             draggingRect_ = false;
             if (!dragRectImg_.isNull()) {
-                const QRect r = clampRectToImage(dragRectImg_.normalized());
-                if (r.width() >= 2 && r.height() >= 2) {
-                    // 检查释放时的修饰键状态，而不是依赖存储的标志
-                    if (e->modifiers() & Qt::ControlModifier) {  // 绘制Mask
+                const QRect rawRect = dragRectImg_.normalized();
+                // Mask 保持在图像内；装甲板 bbox 和关键点允许位于图像外。
+                if (e->modifiers() & Qt::ControlModifier) {
+                    const QRect r = clampRectToImage(rawRect);
+                    if (r.width() >= 2 && r.height() >= 2) {
                         maskRects_.append(r); // 添加到Mask信息用于绘制
                         dragRectImg_ = QRect();
-                    } else {                  // 画框
-                        promptEditSelectedInfo(true);
-                        // TL, BL, BR, TR  (CCW)
                     }
+                } else if (rawRect.width() >= 2 && rawRect.height() >= 2) {
+                    promptEditSelectedInfo(true);
+                    // TL, BL, BR, TR  (CCW)
                 }
             }
             return;
@@ -1008,10 +1008,7 @@ QPointF ImageCanvas::widgetToImage(const QPointF& p) const {
     if (img_.isNull() || R.isEmpty())
         return {};
     const double sx = img_.width() / R.width(), sy = img_.height() / R.height();
-    QPointF pi((p.x() - R.x()) * sx, (p.y() - R.y()) * sy);
-    pi.setX(std::clamp(pi.x(), 0.0, double(img_.width() - 1)));
-    pi.setY(std::clamp(pi.y(), 0.0, double(img_.height() - 1)));
-    return pi;
+    return QPointF((p.x() - R.x()) * sx, (p.y() - R.y()) * sy);
 }
 QPointF ImageCanvas::imageToWidget(const QPointF& p) const {
     const QRectF R = imageRectOnWidget();

@@ -20,10 +20,10 @@ struct Armor {
     std::array<int, 4> keypointVisibility{2, 2, 2, 2}; // V6: TL, BL, BR, TR; editor uses 0/2
 
     // 新增: 归一化边界矩形 (用于15字段格式)
-    double norm_x = -1;  // center_x (归一化), -1 表示未设置
-    double norm_y = -1;  // center_y
-    double norm_w = -1;  // width
-    double norm_h = -1;  // height
+    double norm_x = -1;  // center_x，可位于图像外
+    double norm_y = -1;  // center_y，可位于图像外
+    double norm_w = -1;  // width；负数表示 bbox 尚未设置
+    double norm_h = -1;  // height；负数表示 bbox 尚未设置
 };
 
 Q_DECLARE_METATYPE(Armor)

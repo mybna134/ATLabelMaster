@@ -3,6 +3,12 @@ name: Build Packages
 on:
   push:
   workflow_dispatch:
+    inputs:
+      rebuild_devcontainer:
+        description: Rebuild and publish the devcontainer image even if the Dockerfile tag already exists
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: packages-${{ github.workflow }}-${{ github.ref }}
@@ -11,19 +17,94 @@ concurrency:
 permissions:
   contents: write
   actions: write
+  packages: write
 
 env:
   APP_ID: io.github.mybna134.ATLabelMaster
   DEVCONTAINER_IMAGE: labelmaster:latest
+  DEVCONTAINER_PACKAGE_NAME: atlabelmaster-devcontainer
   DIST_DIR: dist
   FLATPAK_RUNTIME: org.kde.Platform
   FLATPAK_SDK: org.kde.Sdk
   FLATPAK_RUNTIME_VERSION: "6.10"
 
 jobs:
+  devcontainer-image:
+    name: Publish devcontainer image
+    runs-on: ubuntu-24.04
+    outputs:
+      image_ref: ${{ steps.image-meta.outputs.image_ref }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve devcontainer image tag
+        id: image-meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${owner}/${DEVCONTAINER_PACKAGE_NAME}"
+          dockerfile_hash="$(sha256sum Dockerfile | cut -d ' ' -f 1)"
+          image_ref="${image}:dockerfile-${dockerfile_hash}"
+
+          {
+            echo "image=${image}"
+            echo "image_ref=${image_ref}"
+            echo "latest_ref=${image}:latest"
+            echo "cache_ref=${image}:buildcache"
+          } >> "$GITHUB_OUTPUT"
+
+          printf 'Devcontainer image: %s\n' "$image_ref"
+
+      - name: Check published devcontainer image
+        id: published-image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if docker buildx imagetools inspect "${{ steps.image-meta.outputs.image_ref }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Reusing existing devcontainer image."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Devcontainer image is missing and will be published."
+          fi
+
+      - name: Build and publish devcontainer image
+        if: steps.published-image.outputs.exists != 'true' || inputs.rebuild_devcontainer
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          pull: true
+          push: true
+          tags: |
+            ${{ steps.image-meta.outputs.image_ref }}
+            ${{ steps.image-meta.outputs.latest_ref }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=ATLabelMaster devcontainer
+          cache-from: type=registry,ref=${{ steps.image-meta.outputs.cache_ref }}
+          cache-to: type=registry,ref=${{ steps.image-meta.outputs.cache_ref }},mode=max
+
   linux-x86_64:
     name: Linux x86_64 deb and Flatpak
     runs-on: ubuntu-24.04
+    needs: devcontainer-image
 
     steps:
       - name: Checkout
@@ -39,10 +120,18 @@ jobs:
       - name: Install devcontainer CLI
         run: npm install -g @devcontainers/cli
 
-      - name: Rebuild devcontainer image
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull devcontainer image
         run: |
           set -euo pipefail
-          docker build --pull --no-cache -t "${DEVCONTAINER_IMAGE}" -f Dockerfile .
+          docker pull "${{ needs.devcontainer-image.outputs.image_ref }}"
+          docker tag "${{ needs.devcontainer-image.outputs.image_ref }}" "${DEVCONTAINER_IMAGE}"
 
       - name: Start devcontainer
         run: |

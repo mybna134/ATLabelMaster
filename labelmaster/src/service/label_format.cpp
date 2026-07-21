@@ -84,25 +84,21 @@ bool parsePoints(
     }
 
     std::array<double, 8> values{};
+    // Every supported label specification stores keypoints as normalized values.
+    // Do not infer pixel coordinates from magnitude: out-of-image points may be
+    // negative or greater than 1.
     normalized = true;
     for (int i = 0; i < 8; ++i) {
         if (!parseDouble(fields[start + i], "角点", values[i], error))
             return false;
-        normalized = normalized && std::abs(values[i]) <= 1.5;
     }
 
     const double width  = imageSize.width();
     const double height = imageSize.height();
     for (int i = 0; i < 4; ++i) {
-        double x = values[i * 2];
-        double y = values[i * 2 + 1];
-        if (normalized) {
-            x *= width;
-            y *= height;
-        }
-        points[i] = QPointF(
-            std::clamp(x, 0.0, std::max(0.0, width - 1.0)),
-            std::clamp(y, 0.0, std::max(0.0, height - 1.0)));
+        const double x = values[i * 2] * width;
+        const double y = values[i * 2 + 1] * height;
+        points[i] = QPointF(x, y);
     }
     return true;
 }
@@ -272,12 +268,13 @@ bool parseLine(
         }
         std::array<double, 4> bbox{};
         for (int i = 0; i < 4; ++i) {
-            if (!parseDouble(fields[1 + i], "V6 bbox", bbox[i], error) || bbox[i] < 0.0
-                || bbox[i] > 1.0) {
-                if (error.isEmpty())
-                    error = "V6 bbox 必须在 [0, 1] 范围内";
+            if (!parseDouble(fields[1 + i], "V6 bbox", bbox[i], error)) {
                 return false;
             }
+        }
+        if (bbox[2] < 0.0 || bbox[3] < 0.0) {
+            error = "V6 bbox 的宽高不能为负数";
+            return false;
         }
         armor.norm_x = bbox[0];
         armor.norm_y = bbox[1];
@@ -288,11 +285,8 @@ bool parseLine(
             double y        = 0.0;
             const int start = 5 + i * 3;
             if (!parseDouble(fields[start], "V6 关键点 x", x, error)
-                || !parseDouble(fields[start + 1], "V6 关键点 y", y, error) || x < 0.0 || x > 1.0
-                || y < 0.0 || y > 1.0
+                || !parseDouble(fields[start + 1], "V6 关键点 y", y, error)
                 || !parsePoseVisibility(fields[start + 2], armor.keypointVisibility[i], error)) {
-                if (error.isEmpty())
-                    error = "V6 关键点必须在 [0, 1] 范围内";
                 return false;
             }
             points[i] = QPointF(x * imageSize.width(), y * imageSize.height());
@@ -311,10 +305,7 @@ bool parseLine(
         std::array<double, 10> coordinates{};
         const std::array<int, 10> indices{3, 4, 5, 6, 7, 8, 10, 11, 12, 13};
         for (int i = 0; i < int(indices.size()); ++i) {
-            if (!parseDouble(fields[indices[i]], "V5 坐标", coordinates[i], error)
-                || coordinates[i] < 0.0 || coordinates[i] > 1.0) {
-                if (error.isEmpty())
-                    error = "V5 坐标必须在 [0, 1] 范围内";
+            if (!parseDouble(fields[indices[i]], "V5 坐标", coordinates[i], error)) {
                 return false;
             }
         }
@@ -373,19 +364,23 @@ bool parseLine(
             if (!parseDouble(fields[1 + i], "V4 bbox", bbox[i], error))
                 return false;
         }
+        if (bbox[2] < 0.0 || bbox[3] < 0.0) {
+            error = "V4 bbox 的宽高不能为负数";
+            return false;
+        }
         if (!parsePoints(fields, 5, imageSize, points, normalized, error))
             return false;
         assignPoints(armor, points);
         if (normalized) {
-            armor.norm_x = std::clamp(bbox[0], 0.0, 1.0);
-            armor.norm_y = std::clamp(bbox[1], 0.0, 1.0);
-            armor.norm_w = std::clamp(bbox[2], 0.0, 1.0);
-            armor.norm_h = std::clamp(bbox[3], 0.0, 1.0);
+            armor.norm_x = bbox[0];
+            armor.norm_y = bbox[1];
+            armor.norm_w = bbox[2];
+            armor.norm_h = bbox[3];
         } else {
-            armor.norm_x = std::clamp(bbox[0] / imageSize.width(), 0.0, 1.0);
-            armor.norm_y = std::clamp(bbox[1] / imageSize.height(), 0.0, 1.0);
-            armor.norm_w = std::clamp(bbox[2] / imageSize.width(), 0.0, 1.0);
-            armor.norm_h = std::clamp(bbox[3] / imageSize.height(), 0.0, 1.0);
+            armor.norm_x = bbox[0] / imageSize.width();
+            armor.norm_y = bbox[1] / imageSize.height();
+            armor.norm_w = bbox[2] / imageSize.width();
+            armor.norm_h = bbox[3] / imageSize.height();
         }
         return true;
     }
@@ -409,12 +404,14 @@ bool parseLine(
                 if (!parseDouble(fields[3 + i], "V3 bbox", bbox[i], error))
                     return false;
             }
-            armor.norm_x = std::clamp(normalized ? bbox[0] : bbox[0] / imageSize.width(), 0.0, 1.0);
-            armor.norm_y =
-                std::clamp(normalized ? bbox[1] : bbox[1] / imageSize.height(), 0.0, 1.0);
-            armor.norm_w = std::clamp(normalized ? bbox[2] : bbox[2] / imageSize.width(), 0.0, 1.0);
-            armor.norm_h =
-                std::clamp(normalized ? bbox[3] : bbox[3] / imageSize.height(), 0.0, 1.0);
+            if (bbox[2] < 0.0 || bbox[3] < 0.0) {
+                error = "V3 bbox 的宽高不能为负数";
+                return false;
+            }
+            armor.norm_x = normalized ? bbox[0] : bbox[0] / imageSize.width();
+            armor.norm_y = normalized ? bbox[1] : bbox[1] / imageSize.height();
+            armor.norm_w = normalized ? bbox[2] : bbox[2] / imageSize.width();
+            armor.norm_h = normalized ? bbox[3] : bbox[3] / imageSize.height();
         }
         return true;
     }
@@ -511,10 +508,10 @@ BoundingBox projectedBoundingBox(const Armor& armor, const QSize& imageSize) {
     const double width  = std::max(1, imageSize.width());
     const double height = std::max(1, imageSize.height());
     return {
-        std::clamp((minX + maxX) / (2.0 * width), 0.0, 1.0),
-        std::clamp((minY + maxY) / (2.0 * height), 0.0, 1.0),
-        std::clamp((maxX - minX) / width, 0.0, 1.0),
-        std::clamp((maxY - minY) / height, 0.0, 1.0),
+        (minX + maxX) / (2.0 * width),
+        (minY + maxY) / (2.0 * height),
+        (maxX - minX) / width,
+        (maxY - minY) / height,
     };
 }
 
@@ -524,9 +521,7 @@ std::array<QPointF, 4> normalizedPoints(const Armor& armor, const QSize& imageSi
     const std::array<QPointF, 4> source{armor.p0, armor.p1, armor.p2, armor.p3};
     std::array<QPointF, 4> result{};
     for (int i = 0; i < int(source.size()); ++i) {
-        result[i] = QPointF(
-            std::clamp(source[i].x() / width, 0.0, 1.0),
-            std::clamp(source[i].y() / height, 0.0, 1.0));
+        result[i] = QPointF(source[i].x() / width, source[i].y() / height);
     }
     return result;
 }
@@ -619,7 +614,9 @@ PoseClassScheme detectPoseClassScheme(const QStringList& labelPaths) {
     return maximumClass >= 14 ? PoseClassScheme::Classes36 : PoseClassScheme::Classes14;
 }
 
-FormatDetectionResult detectDataSetFormat(const QVector<LabelFileSample>& samples) {
+FormatDetectionResult detectDataSetFormat(
+    const QVector<LabelFileSample>& samples,
+    const std::function<void(int current, int total)>& progress) {
     FormatDetectionResult result;
     const QVector<DataSet> allFormats{
         DataSet::LabelMasterV6,
@@ -639,6 +636,13 @@ FormatDetectionResult detectDataSetFormat(const QVector<LabelFileSample>& sample
         labelPaths.push_back(sample.path);
     result.poseClassScheme = detectPoseClassScheme(labelPaths);
 
+    const int total = static_cast<int>(samples.size());
+    int processed = 0;
+    const auto reportProgress = [&] {
+        ++processed;
+        if (progress)
+            progress(processed, total);
+    };
     for (const LabelFileSample& sample : samples) {
         bool hasData = false;
         QString readError;
@@ -646,8 +650,10 @@ FormatDetectionResult detectDataSetFormat(const QVector<LabelFileSample>& sample
             result.error = readError;
             return result;
         }
-        if (!hasData)
+        if (!hasData) {
+            reportProgress();
             continue;
+        }
         result.hasAnnotations = true;
 
         QVector<DataSet> fileCandidates;
@@ -684,6 +690,7 @@ FormatDetectionResult detectDataSetFormat(const QVector<LabelFileSample>& sample
                                .arg(QFileInfo(sample.path).fileName());
             return result;
         }
+        reportProgress();
     }
 
     if (!result.hasAnnotations) {
@@ -791,13 +798,14 @@ bool writeLabelFile(
                 file.cancelWriting();
                 return false;
             }
-            const BoundingBox bbox = armor.norm_x >= 0.0 && armor.norm_y >= 0.0
+            const BoundingBox bbox = std::isfinite(armor.norm_x) && std::isfinite(armor.norm_y)
+                    && std::isfinite(armor.norm_w) && std::isfinite(armor.norm_h)
                     && armor.norm_w >= 0.0 && armor.norm_h >= 0.0
                 ? BoundingBox{
-                      std::clamp(armor.norm_x, 0.0, 1.0),
-                      std::clamp(armor.norm_y, 0.0, 1.0),
-                      std::clamp(armor.norm_w, 0.0, 1.0),
-                      std::clamp(armor.norm_h, 0.0, 1.0)}
+                      armor.norm_x,
+                      armor.norm_y,
+                      armor.norm_w,
+                      armor.norm_h}
                 : projectedBoundingBox(armor, imageSize);
             stream << poseClass << ' ' << bbox.centerX << ' ' << bbox.centerY << ' ' << bbox.width
                    << ' ' << bbox.height;

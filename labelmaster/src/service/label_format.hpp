@@ -6,6 +6,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <functional>
 
 namespace labelmaster::service::label_format {
 
@@ -27,7 +28,9 @@ struct FormatDetectionResult {
 QString outputFormatName(LabelOutputFormat format);
 QString dataSetName(DataSet format);
 PoseClassScheme detectPoseClassScheme(const QStringList& labelPaths);
-FormatDetectionResult detectDataSetFormat(const QVector<LabelFileSample>& samples);
+FormatDetectionResult detectDataSetFormat(
+    const QVector<LabelFileSample>& samples,
+    const std::function<void(int current, int total)>& progress = {});
 
 bool readLabelFile(
     const QString& path, const QSize& imageSize, DataSet format, QVector<Armor>& armors,
