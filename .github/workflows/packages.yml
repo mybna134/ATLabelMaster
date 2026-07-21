@@ -37,17 +37,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: actions/checkout@v6
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
       - name: Resolve devcontainer image tag
         id: image-meta
@@ -64,7 +62,6 @@ jobs:
             echo "image=${image}"
             echo "image_ref=${image_ref}"
             echo "latest_ref=${image}:latest"
-            echo "cache_ref=${image}:buildcache"
           } >> "$GITHUB_OUTPUT"
 
           printf 'Devcontainer image: %s\n' "$image_ref"
@@ -75,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          if docker buildx imagetools inspect "${{ steps.image-meta.outputs.image_ref }}" >/dev/null 2>&1; then
+          if docker manifest inspect "${{ steps.image-meta.outputs.image_ref }}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Reusing existing devcontainer image."
           else
@@ -85,21 +82,22 @@ jobs:
 
       - name: Build and publish devcontainer image
         if: steps.published-image.outputs.exists != 'true' || inputs.rebuild_devcontainer
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          pull: true
-          push: true
-          tags: |
-            ${{ steps.image-meta.outputs.image_ref }}
-            ${{ steps.image-meta.outputs.latest_ref }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.description=ATLabelMaster devcontainer
-          cache-from: type=registry,ref=${{ steps.image-meta.outputs.cache_ref }}
-          cache-to: type=registry,ref=${{ steps.image-meta.outputs.cache_ref }},mode=max
+        shell: bash
+        env:
+          IMAGE_REF: ${{ steps.image-meta.outputs.image_ref }}
+          LATEST_REF: ${{ steps.image-meta.outputs.latest_ref }}
+        run: |
+          set -euo pipefail
+
+          docker build --pull \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.description=ATLabelMaster devcontainer" \
+            -t "${IMAGE_REF}" \
+            -t "${LATEST_REF}" \
+            -f Dockerfile .
+          docker push "${IMAGE_REF}"
+          docker push "${LATEST_REF}"
 
   linux-x86_64:
     name: Linux x86_64 deb and Flatpak
@@ -108,7 +106,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -121,11 +119,12 @@ jobs:
         run: npm install -g @devcontainers/cli
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
       - name: Pull devcontainer image
         run: |
@@ -488,7 +487,7 @@ jobs:
 
       - name: Publish Nightly release
         if: steps.versions.outputs.has_current_tag != 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.versions.outputs.nightly_release_tag }}
           name: ATLabelMaster ${{ steps.versions.outputs.nightly_version }}
@@ -507,7 +506,7 @@ jobs:
 
       - name: Publish tagged Release
         if: steps.versions.outputs.has_current_tag == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.versions.outputs.current_tag }}
           name: ATLabelMaster ${{ steps.versions.outputs.release_version }}
