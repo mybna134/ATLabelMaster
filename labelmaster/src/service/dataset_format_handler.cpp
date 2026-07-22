@@ -266,19 +266,20 @@ bool LabelMasterV4Format::read(
         QStringList parts = line.simplified().split(' ');
 
         // Format: cls x_c y_c w h x0 y0 x1 y1 x2 y2 x3 y3
-        // cls = color * 16 + size * 8 + class
+        // V4 36 classes: cls = color * 9 + tag
         if (parts.size() != 13)
             continue;
 
         Armor armor;
         bool ok = false;
         const int clsId = parts[0].toInt(&ok);
-        if (!ok || clsId < 0 || clsId >= 64)
+        if (!ok || clsId < 0 || clsId >= 36)
             continue;
 
-        armor.color = IdConvert::colorId2Letter(clsId / 16);
-        armor.size  = (clsId % 16) / 8;
-        armor.cls   = IdConvert::idCollect2Token(clsId % 8);
+        const int tag = clsId % 9;
+        armor.color = IdConvert::colorId2Letter(clsId / 9);
+        armor.size  = tag == 1 || tag == 8 ? 1 : 0;
+        armor.cls   = IdConvert::idCollect2Token(tag <= 6 ? tag : 7);
 
         // Store normalized bbox
         armor.norm_x = parts[1].toDouble();
@@ -298,11 +299,6 @@ bool LabelMasterV4Format::read(
         armor.norm_p2 = QPointF(parts[9].toDouble(), parts[10].toDouble());
         armor.norm_p3 = QPointF(parts[11].toDouble(), parts[12].toDouble());
 
-        // Determine size based on bbox aspect ratio (heuristic)
-        // Big armor typically has higher aspect ratio than small armor
-        double aspectRatio = armor.norm_w / (armor.norm_h + 1e-6);
-        armor.size = (aspectRatio > 2.5) ? 1 : 0;  // 1 = big, 0 = small
-
         armors.append(armor);
     }
 
@@ -320,7 +316,18 @@ bool LabelMasterV4Format::write(
     for (const auto& armor : armors) {
         const int colorId = IdConvert::colorLetter2Id(armor.color);
         const int classId = IdConvert::classToken2Id(armor.cls);
-        stream << colorId * 16 + armor.size * 8 + classId << ' ';
+        if (colorId < 0 || colorId >= 4 || classId < 0 || classId >= 8)
+            return false;
+        int tag = classId;
+        if (classId == 1) {
+            if (armor.size != 1)
+                return false;
+        } else if (classId == 7) {
+            tag = armor.size == 1 ? 8 : 7;
+        } else if (armor.size != 0) {
+            return false;
+        }
+        stream << colorId * 9 + tag << ' ';
 
         // Calculate bbox using SVG perspective transformation (same as file.cpp)
         double x, y, w, h;

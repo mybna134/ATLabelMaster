@@ -6,6 +6,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QDateTime>
+#include <QEvent>
 #include <QHeaderView>
 #include <QImage>
 #include <QItemSelectionModel>
@@ -60,6 +61,12 @@ MainWindow::MainWindow(QWidget* parent)
 
     // 智能标注
     connect(this, &MainWindow::sigSmartAnnotateRequested, ui_->label, &ImageCanvas::requestDetect);
+    connect(ui_->label, &ImageCanvas::shortcutFeedback, this, [this](const QString& message) {
+        setStatus(message, 1500);
+    });
+
+    // 文件树等子控件有焦点时也让标注快捷键优先作用于画布。
+    qApp->installEventFilter(this);
 
     statusBar()->showMessage(tr("Ready"), 3000);
 }
@@ -163,6 +170,14 @@ void MainWindow::setLabelContent(const QString& content) {
         ui_->label_content_edit->setPlainText(content);
 }
 
+void MainWindow::setConflictMode(bool enabled, int remaining) {
+    if (ui_->merge_conflict_button)
+        ui_->merge_conflict_button->setVisible(enabled);
+    setWindowTitle(
+        enabled ? tr("ATLabelMaster - 冲突处理（剩余 %1）").arg(remaining)
+                : QStringLiteral("ATLabelMaster"));
+}
+
 /* ---------------- 配置/事件 ---------------- */
 void MainWindow::enableDragDrop(bool on) {
     dragDropEnabled_ = on;
@@ -177,6 +192,19 @@ bool MainWindow::textInputHasFocus() const {
         && (w->inherits("QLineEdit") || w->inherits("QTextEdit") || w->inherits("QPlainTextEdit"));
 }
 
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::KeyPress && QApplication::activeWindow() == this
+        && !textInputHasFocus()) {
+        auto* keyEvent = static_cast<QKeyEvent*>(event);
+        if (!keyEvent->isAutoRepeat() && ui_->label
+            && ui_->label->handleEditorShortcut(keyEvent->key(), keyEvent->modifiers())) {
+            keyEvent->accept();
+            return true;
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
 void MainWindow::keyPressEvent(QKeyEvent* e) {
     if (textInputHasFocus()) {
         QMainWindow::keyPressEvent(e);
@@ -187,18 +215,9 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         return;
     }
 
-    // 数字键快速选类 (1-9 对应 G,1,2,3,4,5,O,B 等)
-    if (e->key() >= Qt::Key_1 && e->key() <= Qt::Key_9) {
-        static const QStringList classes = {"G", "1", "2", "3", "4", "5", "O", "B", "9"};
-        int idx = e->key() - Qt::Key_1;
-        if (idx < classes.size()) {
-            currentClass_ = classes[idx];
-            if (ui_->label)
-                ui_->label->setCurrentClass(currentClass_);
-            setStatus(tr("当前类别：%1").arg(currentClass_), 1000);
-            e->accept();
-            return;
-        }
+    if (ui_->label && ui_->label->handleEditorShortcut(e->key(), e->modifiers())) {
+        e->accept();
+        return;
     }
 
     switch (e->key()) {
@@ -208,14 +227,6 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         return;
     case Qt::Key_E:
         emit sigNextRequested();
-        e->accept();
-        return;
-    case Qt::Key_S:
-        emit sigSaveRequested();
-        e->accept();
-        return;
-    case Qt::Key_O:
-        emit sigOpenFolderRequested();
         e->accept();
         return;
     case Qt::Key_H:
@@ -234,14 +245,6 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         emit sigSettingsRequested();
         e->accept();
         return;
-    case Qt::Key_A: {
-        QString cls = currentClass_;
-        if (cls.isEmpty())
-            cls = QStringLiteral("G");  // 默认类别
-        setStatus(tr("开始标注：%1（拖一个矩形，然后拖拽角点精调，右键/ESC取消）").arg(cls), 2000);
-        e->accept();
-        return;
-    }
     default: emit sigKeyCommand(QKeySequence(e->key()).toString()); break;
     }
     QMainWindow::keyPressEvent(e);
@@ -295,6 +298,7 @@ void MainWindow::setupActions() {
     ensureAction(ui_->actionSmart, QKeySequence(Qt::Key_Space), tr("Smart Annotate (Space)"));
     ensureAction(ui_->actionSettings, {}, tr("Settings"));
     ensureAction(ui_->actionStas, QKeySequence(Qt::Key_F1), tr("Get STAS."));
+    ensureAction(ui_->actionFilter, {}, tr("按 Label 类型筛选图片"));
 
     connect(ui_->actionOpen, &QAction::triggered, this, &MainWindow::sigOpenFolderRequested);
     connect(ui_->actionSave, &QAction::triggered, this, &MainWindow::sigSaveRequested);
@@ -305,7 +309,7 @@ void MainWindow::setupActions() {
     connect(ui_->actionSmart, &QAction::triggered, this, &MainWindow::sigSmartAnnotateRequested);
     connect(ui_->actionStas, &QAction::triggered, this, &MainWindow::showStasDialog);
     connect(ui_->actionSettings, &QAction::triggered, this, &MainWindow::sigSettingsRequested);
-
+    connect(ui_->actionFilter, &QAction::triggered, this, &MainWindow::sigFilterRequested);
 }
 
 void MainWindow::wireButtonsToActions() {
@@ -317,4 +321,7 @@ void MainWindow::wireButtonsToActions() {
     connect(ui_->delete_button, &QPushButton::clicked, ui_->actionDelete, &QAction::trigger);
     connect(ui_->save_button, &QPushButton::clicked, ui_->actionSave, &QAction::trigger);
     connect(ui_->setttings_button, &QPushButton::clicked, ui_->actionSettings, &QAction::trigger);
+    connect(
+        ui_->merge_conflict_button, &QPushButton::clicked, this,
+        &MainWindow::sigForceMergeConflictRequested);
 }

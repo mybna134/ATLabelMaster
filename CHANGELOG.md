@@ -4,16 +4,31 @@ All notable changes to ATLabelMaster will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Show dataset scanning progress immediately instead of waiting for the filesystem model, keep the UI responsive, and reuse the initial scan during conversion.
+- Corrected V4 to its 36-class encoding and V5 to its fixed 14-class encoding.
+
+### Added - Filtering review mode
+- Added an exact `color / size / class` combination selector with 64 independently selectable combinations.
+- Move matching image/label pairs into sibling `filtering/images` and `filtering/labels` queues with a manifest for exact path restoration.
+- Added a review dialog with detection overlays, brightness enhancement, restore, direct delete, resumable queues, and automatic exit when the filtering queue becomes empty.
+
 ### Added - LabelMaster V6
-- Added LabelMaster V6 as the default label format, compatible with the 17-field YOLO Pose layout.
-- Added per-keypoint `0/2` visibility editing; the controls are shown only for V6 and the reader remains compatible with `1`.
-- Added `rm_label_tool.py` compatible 14/36-class parsing and dataset-level scheme detection.
-- Added direct, non-converting V4/V6 opening and safe automatic legacy-format normalization.
-- V5 and other visibility-aware inputs normalize to V6; inputs without visibility normalize to V4.
+- Added automatic import for the 9-field UnionSecret format, including Small Base at class IDs 7/20/33 and Big Base at 8/21/34.
+- Added explicit V1/UPC and UnionSecret/NWPU format choosers for ambiguous inputs; UnionSecret/NWPU IDs 39–63 identify NWPU automatically.
+- Added resumable `stage/images` and `stage/labels` conflict handling for malformed class ranges and field counts, with lenient recovery of valid rows, source-format/V6 dual validation, automatic source-to-V6 conversion, and a warned force-merge escape hatch.
+- Added the new 19-field LabelMaster V6 layout: `color size class bbox (x y visibility)[4]`.
+- Renamed the former 17-field V6 / YOLO Pose layout to V5 and retained its 14-class reader for migration.
+- Added per-keypoint visibility editing with `0=不可见`, `1=不在范围内`, and `2=可见`.
+- Added editable bbox corner handles for bbox-capable output formats.
+- Added direct, non-converting V6 opening and safe normalization of every supported legacy format to V6.
+- Inputs without visibility information now normalize with all four keypoints set to `2`.
 - Added strict line validation and atomic label replacement to prevent malformed imports from clearing labels.
 - Added dataset-wide automatic format detection and removed manual input/output conversion controls.
 - Added safe conflict rejection plus a title-bar `?` dialog describing every supported format.
 - Allowed keypoints and bbox values outside the image range; negative/out-of-range label values are preserved during reading and conversion. Masks remain clipped to the image.
+- Added spatial WASD Detector selection, direct color/class/size editing shortcuts, and a full-canvas crosshair that remains visible outside the displayed image.
+- Added J/K/N/M keypoint-visibility shortcuts with single/double-press handling and hollow rendering for invisible or out-of-range selected keypoints.
 
 ### Added - Pixel Art UI System
 - **Theme Manager** - Complete theme system with JSON configuration

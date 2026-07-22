@@ -6,6 +6,7 @@
 #include <QRect>
 #include <QString>
 #include <QVector>
+#include <Qt>
 #include <array>
 #include <list>
 #include <opencv2/objdetect.hpp>
@@ -18,6 +19,7 @@
 class QPainter;
 class QKeyEvent;
 class QMouseEvent;
+class QTimer;
 class QWheelEvent;
 class QSvgRenderer;
 
@@ -33,6 +35,7 @@ public:
     void setImage(const QImage& img);
     const QImage& currentImage() const { return img_; }
     QString currentImagePath() const { return imgPath_; }
+    bool brightnessEnhanced() const { return enhanceV_; }
     void setModelInputSize(const QSize& s);
     void setRoiMode(RoiMode m);
     RoiMode roiMode() const { return roiMode_; }
@@ -61,16 +64,18 @@ public slots:
     void setCurrentClass(const QString& cls) { currentClass_ = cls; } // 新框默认
     QString currentClass() const { return currentClass_; }
     bool setSelectedInfo(
-        const QString& cls, const QString& color,
-        const int& size, int vis0 = 2, int vis1 = 2,
+        const QString& cls, const QString& color, const int& size, int vis0 = 2, int vis1 = 2,
         int vis2 = 2, int vis3 = 2);           // 改类别、颜色、尺寸和逐点可见性
     bool setSelectedClass(const QString& cls); // 改“选中框”的 cls
     bool setSelectedIndex(int idx);            // -1 取消选中
     int selectedIndex() const { return selectedIndex_; }
+    // 主标注窗口快捷键。返回 true 表示该按键已被识别并处理。
+    bool handleEditorShortcut(
+        int key, Qt::KeyboardModifiers modifiers = Qt::NoModifier);
     // 更新颜色和类型
     void ProcessInfoChanged(
-        const QString& EditedClass, const QString& Color, const int& size,
-        int vis0, int vis1, int vis2, int vis3, bool isCurrent);
+        const QString& EditedClass, const QString& Color, const int& size, int vis0, int vis1,
+        int vis2, int vis3, bool isCurrent);
     void histEqualize();
 signals:
     // ROI
@@ -89,6 +94,7 @@ signals:
     void detectionUpdated(int index, const Armor&);              // 类别或点被改
     void detectionUpdated(QVector<int> indexList, const Armor&); // 类别或点被改
     void detectionRemoved(int index);                            // 删除哪个
+    void shortcutFeedback(const QString& message);
 
     // 批量发布（供外部保存）
     void annotationsPublished(const QVector<Armor>& armors, const QImage& image, bool needSaveImg);
@@ -108,13 +114,23 @@ protected:
 private:
     // 命中 & 几何
     int hitHandleOnSelected(const QPoint& wpos) const; // 命中当前“选中目标”的角点
+    int hitBBoxHandleOnSelected(const QPoint& wpos) const;
+    std::array<QPointF, 4> bboxCornersInImage(const Armor& armor) const;
+    bool bboxEditingSupported() const;
     int hitDetectionStrict(const QPoint& wpos) const;  // 严格在框内才算命中
     bool pointInsidePolyW(const QPolygonF& polyW, const QPointF& w) const;
     int hitMaskStrict(const QPoint& wpos) const;       // 命中Mask区域
+    bool selectDetectionInDirection(int key);
+    int visibilityPointForKey(int key) const;
+    bool handleVisibilityShortcut(int pointIndex);
+    void commitPendingVisibilityToggle();
+    void cancelPendingVisibilityShortcut();
+    void setKeypointVisibility(
+        int detectionIndex, int pointIndex, int visibility, const QString& action);
     // 编辑颜色和类别
     void promptEditSelectedInfo(bool isCurrent = false);
     void updateFitRect();
-    void updateBBoxFromCorners(Armor& a) const;  // 从角点计算归一化BBox（使用SVG透视变换）
+    void updateBBoxFromCorners(Armor& a) const; // 从角点计算归一化BBox（使用SVG透视变换）
     QRectF imageRectOnWidget() const;
     QPointF widgetToImage(const QPointF& p) const;
     QPointF imageToWidget(const QPointF& p) const;
@@ -180,14 +196,20 @@ private:
     QPoint dragRectStartW_;
     QRect dragRectImg_;
 
-    int dragHandle_  = -1;      // 正在拖动的角点（仅对 selected 生效）
-    int hoverHandle_ = -1;      // 悬停角点（仅对 selected 生效）
+    int dragHandle_      = -1;  // 正在拖动的角点（仅对 selected 生效）
+    int hoverHandle_     = -1;  // 悬停角点（仅对 selected 生效）
+    int dragBBoxHandle_  = -1;  // 正在拖动 bbox 四角
+    int hoverBBoxHandle_ = -1;
+    QPointF bboxDragOppositeImg_;
 
     int currentSize_ = 0;
     QString currentClass_;
     QString currentColor_;
     std::array<int, 4> currentKeypointVisibility_{2, 2, 2, 2};
     QHash<int, QHash<int, QSvgRenderer*>> svgCache_;
+    QTimer* visibilityShortcutTimer_       = nullptr;
+    int pendingVisibilityDetectionIndex_   = -1;
+    int pendingVisibilityPointIndex_       = -1;
 
     // 参数
     const double kMinScale_  = 0.2;

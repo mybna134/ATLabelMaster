@@ -18,7 +18,7 @@ public:
     void updateInfo(
         bool isCurrent = false, const int& defaultClassId = 0, const int& defaultColorId = 0,
         const int& defaultSize = 0, bool visibilitySupported = false, int vis0 = 2, int vis1 = 2,
-        int vis2 = 2, int vis3 = 2, bool pose14Classes = false);
+        int vis2 = 2, int vis3 = 2);
 signals:
     void InfoGetted(
         QString editedClass, QString color, int size, int vis0, int vis1, int vis2, int vis3,

@@ -2,16 +2,17 @@
 // File: service/file.cpp
 // ===============================
 #include "service/file.hpp"
-#include "service/label_format.hpp"
 #include "../util/id_convert.hpp"
 #include "../util/svg_constants.hpp"
+#include "service/label_format.hpp"
 #include "types.hpp"
-#include <QBuffer>
 #include <QApplication>
+#include <QBuffer>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QDirIterator>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -19,9 +20,15 @@
 #include <QFileSystemModel>
 #include <QImage>
 #include <QImageReader>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMessageBox>
-#include <QQueue>
 #include <QProgressDialog>
+#include <QPushButton>
+#include <QQueue>
+#include <QSaveFile>
+#include <QSet>
 #include <QSettings>
 #include <QSortFilterProxyModel>
 #include <cstdio>
@@ -51,18 +58,19 @@
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 # include <QStringConverter> // Qt6: QTextStream::setEncoding
 #endif
-#include <QTextStream>
+#include <QEventLoop>
 #include <QTextBrowser>
+#include <QTextStream>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWhatsThis>
-#include <QEventLoop>
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
+#include "../ui/filter_dialog.hpp"
 #include "../ui/stas_dialog.h"
 #include "../util/string.hpp"
 #include "controller/settings.hpp"
@@ -102,6 +110,104 @@ bool directoryContainsImage(const QString& dirPath) {
     return it.hasNext();
 }
 
+bool chooseV1OrUpcFormat(QWidget* parent, DataSet& format) {
+    QMessageBox box(parent);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(QObject::tr("选择 10 字段标签格式"));
+    box.setText(QObject::tr("这些标签同时符合 LabelMaster V1 和 UPC 格式。"));
+    box.setInformativeText(QObject::tr("请选择数据集实际使用的格式；取消后不会转换任何标签。"));
+    auto* v1Button  = box.addButton(QObject::tr("LabelMaster V1"), QMessageBox::AcceptRole);
+    auto* upcButton = box.addButton(QObject::tr("UPC"), QMessageBox::ActionRole);
+    box.addButton(QMessageBox::Cancel);
+    box.exec();
+
+    if (box.clickedButton() == v1Button) {
+        format = DataSet::LabelMaster;
+        return true;
+    }
+    if (box.clickedButton() == upcButton) {
+        format = DataSet::UPC;
+        return true;
+    }
+    return false;
+}
+
+bool chooseNineFieldFormat(QWidget* parent, DataSet& format) {
+    QMessageBox box(parent);
+    box.setIcon(QMessageBox::Question);
+    box.setWindowTitle(QObject::tr("选择 9 字段类别编码"));
+    box.setText(QObject::tr("9 字段标签的 class_id 全部位于 0～38，无法自动区分格式。"));
+    box.setInformativeText(
+        QObject::tr("请选择该数据集使用 UnionSecret 格式还是 NWPU 格式。"));
+    auto* unionSecretButton =
+        box.addButton(QObject::tr("UnionSecret 格式"), QMessageBox::AcceptRole);
+    auto* nwpuButton = box.addButton(QObject::tr("NWPU 格式"), QMessageBox::ActionRole);
+    box.addButton(QMessageBox::Cancel);
+    box.exec();
+
+    if (box.clickedButton() == unionSecretButton) {
+        format = DataSet::UnionSecret;
+        return true;
+    }
+    if (box.clickedButton() == nwpuButton) {
+        format = DataSet::NWPU;
+        return true;
+    }
+    return false;
+}
+
+bool copyFileReplacing(
+    const QString& source, const QString& destination, bool replace, QString& error) {
+    if (!QFile::exists(source)) {
+        error = QObject::tr("源文件不存在：%1").arg(source);
+        return false;
+    }
+    if (!QDir().mkpath(QFileInfo(destination).absolutePath())) {
+        error = QObject::tr("无法创建目录：%1").arg(QFileInfo(destination).absolutePath());
+        return false;
+    }
+    if (QFile::exists(destination)) {
+        if (!replace) {
+            error = QObject::tr("目标文件已存在：%1").arg(destination);
+            return false;
+        }
+        if (!QFile::remove(destination)) {
+            error = QObject::tr("无法替换目标文件：%1").arg(destination);
+            return false;
+        }
+    }
+    if (!QFile::copy(source, destination)) {
+        error = QObject::tr("复制失败：%1 → %2").arg(source, destination);
+        return false;
+    }
+    return true;
+}
+
+bool moveFileWithoutOverwrite(const QString& source, const QString& destination, QString& error) {
+    if (!QFile::exists(source))
+        return true;
+    if (QFile::exists(destination)) {
+        error = QObject::tr("目标目录中已存在同名文件：%1").arg(destination);
+        return false;
+    }
+    if (!QDir().mkpath(QFileInfo(destination).absolutePath())) {
+        error = QObject::tr("无法创建目录：%1").arg(QFileInfo(destination).absolutePath());
+        return false;
+    }
+    if (QFile::rename(source, destination))
+        return true;
+    if (!QFile::copy(source, destination)) {
+        error = QObject::tr("移动失败：%1 → %2").arg(source, destination);
+        return false;
+    }
+    if (!QFile::remove(source)) {
+        QFile::remove(destination);
+        error = QObject::tr("无法删除移动后的源文件：%1").arg(source);
+        return false;
+    }
+    return true;
+}
+
 QString imageDirectoryFromParent(const QString& parentPath) {
     const QDir parent(parentPath);
     const QStringList imageDirNames = {
@@ -128,39 +234,58 @@ QString imageDirectoryFromParent(const QString& parentPath) {
 QString formatHelpHtml() {
     return QStringLiteral(
         "<h2>支持的标签格式</h2>"
-        "<p>坐标均为归一化值；bbox 和关键点均允许越过图像边界，<code>pts</code> 的点序为 TL、BL、BR、TR。</p>"
+        "<p>坐标均为归一化值；bbox 和关键点均允许越过图像边界，<code>pts</code> 的点序为 "
+        "TL、BL、BR、TR。</p>"
         "<table cellspacing='8'>"
-        "<tr><th align='left'>格式</th><th align='left'>字段布局</th><th align='left'>自动处理</th></tr>"
-        "<tr><td>V1（10）</td><td><code>color class pts[4]</code></td><td>转 V4；与部分 UPC 数据不可区分</td></tr>"
-        "<tr><td>V2（11）</td><td><code>color size class pts[4]</code></td><td>转 V4</td></tr>"
-        "<tr><td>V3（15）</td><td><code>color size class bbox pts[4]</code></td><td>转 V4</td></tr>"
-        "<tr><td>V4（13）</td><td><code>combined-class bbox pts[4]</code></td><td>直接打开</td></tr>"
-        "<tr><td>V5 / Bevy（15）</td><td><code>color size class center left-points left-vis right-points right-vis</code></td><td>转 V6</td></tr>"
-        "<tr><td>V6（17）</td><td><code>class bbox (x y visibility)[4]</code>；可见性使用 0/2</td><td>直接打开</td></tr>"
-        "<tr><td>HITSZ（10）</td><td><code>pts[4] class color</code></td><td>转 V4</td></tr>"
-        "<tr><td>UPC（10）</td><td><code>color class pts[4]</code></td><td>转 V4；类别 0～7 时可能与 V1 冲突</td></tr>"
-        "<tr><td>NWPU（9）</td><td><code>combined-class pts[4]</code></td><td>转 V4</td></tr>"
+        "<tr><th align='left'>格式</th><th align='left'>字段布局</th><th "
+        "align='left'>自动处理</th></tr>"
+        "<tr><td>V1（10）</td><td><code>color class pts[4]</code></td><td>转 V6；与 UPC "
+        "并列时手动选择</td></tr>"
+        "<tr><td>V2（11）</td><td><code>color size class pts[4]</code></td><td>转 V6</td></tr>"
+        "<tr><td>V3（15）</td><td><code>color size class bbox pts[4]</code></td><td>转 V6</td></tr>"
+        "<tr><td>V4（13，36 类）</td><td><code>combined-class bbox pts[4]</code></td><td>转 "
+        "V6</td></tr>"
+        "<tr><td>V5（17，14 类）</td><td><code>class_id bbox (x y visibility)[4]</code></td><td>转 "
+        "V6</td></tr>"
+        "<tr><td>V6（19）</td><td><code>color size class bbox (x y "
+        "visibility)[4]</code></td><td>直接打开</td></tr>"
+        "<tr><td>HITSZ（10）</td><td><code>pts[4] class color</code></td><td>转 V6</td></tr>"
+        "<tr><td>UPC（10）</td><td><code>color class pts[4]</code></td><td>转 V6；类别 0～7 "
+        "时可能与 V1 冲突</td></tr>"
+        "<tr><td>UnionSecret（9）</td><td><code>combined-class pts[4]</code></td><td>转 "
+        "V6；与低编号 NWPU 数据需手动选择</td></tr>"
+        "<tr><td>NWPU（9）</td><td><code>combined-class pts[4]</code></td><td>转 V6</td></tr>"
         "</table>"
         "<h3>字段说明</h3>"
         "<ul>"
         "<li><code>bbox</code> 依次为中心点 x/y、宽、高；<code>pts[4]</code> 为四组 x/y。</li>"
-        "<li>V1、V2、V3、UPC 的 <code>color</code> 位于行首；HITSZ 将 <code>class color</code> 放在行尾。</li>"
-        "<li>V5 的左右灯条各有两个端点及一个 0/1 可见性位，转换后分别映射到 V6 的两个关键点并写为 0/2。</li>"
-        "<li>V6 的四个关键点各自携带可见性；编辑器写 0=不可见、2=可见，读取兼容 1。</li>"
-        "<li>V6 类别兼容 14 类和 36 类体系；扫描到 class_id≥14 时使用 36 类，否则按参考工具规则使用 14 类，空数据集使用 36 类。</li>"
-        "<li>V4 和 NWPU 的组合类别按 <code>color*16 + size*8 + class</code> 解码。</li>"
+        "<li>V1、V2、V3、UPC 的 <code>color</code> 位于行首；HITSZ 将 <code>class color</code> "
+        "放在行尾。</li>"
+        "<li>V4 固定使用 36 类编码：每种颜色占 9 个编号，组内依次为 "
+        "G/Big 1/2/3/4/5/O/Small Base/Big Base。</li>"
+        "<li>V5 是原 17 字段 V6，只使用 14 类编码；class_id 允许范围为 0～13。</li>"
+        "<li>V6 的 <code>color/size/class</code> 定义与 V2/V3 "
+        "相同；四个关键点各自携带可见性：0=不可见、1=不在范围内、2=可见。</li>"
+        "<li>不含可见性字段的输入转换为 V6 时，四点可见性全部设为 2。</li>"
+        "<li>NWPU 的组合类别按 <code>color*16 + size*8 + class</code> 解码。</li>"
+        "<li>UnionSecret 格式中 B/R/G 每种颜色占 13 个编号；0～7 是 Small "
+        "G/1/2/3/4/5/O/Base，8～12 是 Big Base/G/3/4/5。class_id 全部小于 39 时需手动选择 "
+        "UnionSecret 格式或 NWPU 格式；"
+        "出现 39～63 时自动判为 NWPU。</li>"
         "</ul>"
         "<h3>识别规则</h3>"
-        "<p>程序扫描目录内全部非空标签，只有所有文件都指向同一个格式时才会转换。"
-        "V5 的可见性位和中心点关系具有更高识别优先级。空数据集默认使用 V6。"
-        "若候选格式仍不唯一、目录混用格式或标签损坏，程序会停止且不会改写任何标签。</p>");
+        "<p>"
+        "程序扫描目录内全部非空标签，按获得最多文件支持的格式导入；候选仍并列时要求手动选择或停止。"
+        "除 V6 外的受支持格式统一转换为 V6；空数据集默认使用 V6。"
+        "选定格式后，class 范围、字段数或其他内容错误的整个图片/标签会移入数据集根目录的 "
+        "<code>stage/images</code> 与 <code>stage/labels</code>，合法样本继续完成导入。</p>");
 }
 
 void showFormatHelp(QWidget* parent) {
     QDialog dialog(parent);
     dialog.setWindowTitle(QObject::tr("标签格式详解"));
     dialog.resize(760, 560);
-    auto* layout = new QVBoxLayout(&dialog);
+    auto* layout  = new QVBoxLayout(&dialog);
     auto* browser = new QTextBrowser(&dialog);
     browser->setHtml(formatHelpHtml());
     layout->addWidget(browser);
@@ -189,8 +314,7 @@ public:
 
 protected:
     bool event(QEvent* event) override {
-        if (event->type() == QEvent::EnterWhatsThisMode
-            || event->type() == QEvent::WhatsThis
+        if (event->type() == QEvent::EnterWhatsThisMode || event->type() == QEvent::WhatsThis
             || event->type() == QEvent::WhatsThisClicked) {
             queueFormatHelp();
             return true;
@@ -260,6 +384,12 @@ void FileService::exposeModel() { emit modelReady(proxy_); }
 // ---------- 打开入口 ----------
 
 void FileService::openFolderDialog(const DataSet& type) {
+    if (conflictMode_) {
+        QMessageBox::information(
+            QApplication::activeWindow(), tr("请先处理冲突"),
+            tr("当前数据集仍有 stage 样本。请先逐个保存修复结果，或使用右下角的强制合并。"));
+        return;
+    }
     const QString dir = QFileDialog::getExistingDirectory(
         nullptr, tr("选择图片文件夹"), QString(),
         QFileDialog::Options(QFileDialog::DontUseNativeDialog | QFileDialog::ShowDirsOnly));
@@ -271,24 +401,200 @@ void FileService::openFolderDialog(const DataSet& type) {
     box.setWindowTitle(tr("选择目录类型"));
     box.setText(tr("你选择的是图片所在目录，还是图片所在目录的父目录？"));
     box.setInformativeText(tr("选择父目录时，会优先打开其中的 images/image/imgs/img 子目录。"));
-    auto* imageDirButton = box.addButton(tr("图片所在目录"), QMessageBox::AcceptRole);
+    auto* imageDirButton  = box.addButton(tr("图片所在目录"), QMessageBox::AcceptRole);
     auto* parentDirButton = box.addButton(tr("图片目录父目录"), QMessageBox::ActionRole);
-    auto* cancelButton = box.addButton(QMessageBox::Cancel);
+    auto* cancelButton    = box.addButton(QMessageBox::Cancel);
     box.exec();
     auto* clickedButton = box.clickedButton();
     if (clickedButton == cancelButton
         || (clickedButton != imageDirButton && clickedButton != parentDirButton))
         return;
 
-    const QString openPath = clickedButton == parentDirButton
-        ? imageDirectoryFromParent(dir)
-        : QDir::cleanPath(dir);
+    const QString openPath =
+        clickedButton == parentDirButton ? imageDirectoryFromParent(dir) : QDir::cleanPath(dir);
 
     Q_UNUSED(type);
     currentDataSet = DataSet::Auto;
     openDir(openPath);
 }
-// 目录加载完成后如果需要导入，则进行导入，如果不需要导入再尝试选第一张
+
+void FileService::startFiltering() {
+    if (conflictMode_) {
+        QMessageBox::information(
+            QApplication::activeWindow(), tr("无法开始筛选"), tr("请先处理完 stage 冲突样本。"));
+        return;
+    }
+    if (!pendingDir_.isEmpty() || currentDataSet == DataSet::Auto) {
+        QMessageBox::information(
+            QApplication::activeWindow(), tr("无法开始筛选"), tr("请等待当前图片目录加载完成。"));
+        return;
+    }
+
+    const QString imageDir = QDir::cleanPath(fsModel_->rootPath());
+    if (imageDir.isEmpty() || !QFileInfo(imageDir).isDir()) {
+        QMessageBox::information(
+            QApplication::activeWindow(), tr("无法开始筛选"), tr("请先打开一个图片目录。"));
+        return;
+    }
+
+    QDir imageParent(imageDir);
+    imageParent.cdUp();
+    const QString filteringRoot      = imageParent.filePath(QStringLiteral("filtering"));
+    const QString filteringImagesDir = QDir(filteringRoot).filePath(QStringLiteral("images"));
+    const QString filteringLabelsDir = QDir(filteringRoot).filePath(QStringLiteral("labels"));
+    const QString manifestPath = QDir(filteringRoot).filePath(QStringLiteral("manifest.json"));
+
+    QVector<ui::FilterReviewEntry> entries;
+    if (QFile::exists(manifestPath)) {
+        QString error;
+        if (!ui::loadFilterManifest(filteringRoot, entries, &error)) {
+            QMessageBox::critical(QApplication::activeWindow(), tr("无法恢复筛选模式"), error);
+            return;
+        }
+        if (!entries.isEmpty()) {
+            ui::FilterReviewDialog review(filteringRoot, entries, QApplication::activeWindow());
+            review.exec();
+            currentDataSet = DataSet::Auto;
+            openDir(imageDir);
+            return;
+        }
+        QFile::remove(manifestPath);
+    } else if (directoryContainsImage(filteringImagesDir)) {
+        QMessageBox::critical(
+            QApplication::activeWindow(), tr("无法恢复筛选模式"),
+            tr("filtering 中存在图片但缺少 manifest.json，无法确定原始路径。"));
+        return;
+    }
+
+    ui::FilterSelectionDialog selection(QApplication::activeWindow());
+    if (selection.exec() != QDialog::Accepted)
+        return;
+    QSet<QString> selectedKeys;
+    for (const QString& key : selection.selectedKeys())
+        selectedKeys.insert(key);
+
+    struct FilterCandidate {
+        QString imagePath;
+        QString labelPath;
+    };
+    QVector<FilterCandidate> candidates;
+    QSet<QString> visitedLabels;
+    QProgressDialog progress(
+        tr("正在扫描标签组合…"), tr("取消"), 0, 0, QApplication::activeWindow());
+    progress.setWindowTitle(tr("筛选 Label"));
+    progress.setWindowModality(Qt::ApplicationModal);
+    progress.setMinimumDuration(0);
+    progress.show();
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
+    QDirIterator iterator(imageDir, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+    int scanned = 0;
+    while (iterator.hasNext()) {
+        const QString imagePath = iterator.next();
+        const QString labelPath = labelFileForImage(imagePath);
+        ++scanned;
+        if (scanned == 1 || scanned % 20 == 0) {
+            progress.setLabelText(tr("正在扫描第 %1 张图片…").arg(scanned));
+            QApplication::processEvents();
+            if (progress.wasCanceled())
+                return;
+        }
+        if (!QFile::exists(labelPath) || visitedLabels.contains(labelPath))
+            continue;
+        visitedLabels.insert(labelPath);
+
+        QImageReader reader(imagePath);
+        const QSize imageSize = reader.size();
+        if (imageSize.isEmpty())
+            continue;
+        QVector<Armor> armors;
+        QString error;
+        if (!labelmaster::service::label_format::readLabelFile(
+                labelPath, imageSize, DataSet::LabelMasterV6, armors, &error)) {
+            progress.close();
+            QMessageBox::critical(
+                QApplication::activeWindow(), tr("筛选失败"),
+                tr("%1：%2").arg(QFileInfo(labelPath).fileName(), error));
+            return;
+        }
+
+        bool matches = false;
+        for (const Armor& armor : armors) {
+            const int colorId = IdConvert::colorLetter2Id(armor.color);
+            const int classId =
+                IdConvert::classToken2Id(IdConvert::normalizeClasslToken(armor.cls));
+            if (selectedKeys.contains(ui::filterCombinationKey(colorId, armor.size, classId))) {
+                matches = true;
+                break;
+            }
+        }
+        if (matches)
+            candidates.push_back({imagePath, labelPath});
+    }
+
+    if (candidates.isEmpty()) {
+        progress.close();
+        QMessageBox::information(
+            QApplication::activeWindow(), tr("筛选完成"), tr("没有图片包含所选 Label 组合。"));
+        return;
+    }
+
+    progress.setRange(0, candidates.size());
+    progress.setValue(0);
+    progress.setCancelButton(nullptr);
+    entries.reserve(candidates.size());
+    for (int index = 0; index < candidates.size(); ++index) {
+        const FilterCandidate& candidate = candidates[index];
+        const QString relativeImage      = QDir(imageDir).relativeFilePath(candidate.imagePath);
+        const QFileInfo relativeInfo(relativeImage);
+        const QString relativeLabel = relativeInfo.path() == QStringLiteral(".")
+                                        ? relativeInfo.completeBaseName() + QStringLiteral(".txt")
+                                        : relativeInfo.path() + QLatin1Char('/')
+                                              + relativeInfo.completeBaseName()
+                                              + QStringLiteral(".txt");
+        ui::FilterReviewEntry entry;
+        entry.filteredImagePath = QDir::cleanPath(QDir(filteringImagesDir).filePath(relativeImage));
+        entry.filteredLabelPath = QDir::cleanPath(QDir(filteringLabelsDir).filePath(relativeLabel));
+        entry.originalImagePath = candidate.imagePath;
+        entry.originalLabelPath = candidate.labelPath;
+
+        QString error;
+        if (!moveFileWithoutOverwrite(candidate.labelPath, entry.filteredLabelPath, error)) {
+            progress.close();
+            QMessageBox::critical(QApplication::activeWindow(), tr("筛选移动失败"), error);
+            break;
+        }
+        if (!moveFileWithoutOverwrite(candidate.imagePath, entry.filteredImagePath, error)) {
+            QString rollbackError;
+            moveFileWithoutOverwrite(entry.filteredLabelPath, candidate.labelPath, rollbackError);
+            progress.close();
+            QMessageBox::critical(QApplication::activeWindow(), tr("筛选移动失败"), error);
+            break;
+        }
+        entries.push_back(entry);
+        if (!ui::saveFilterManifest(filteringRoot, entries, &error)) {
+            QString rollbackError;
+            entries.removeLast();
+            moveFileWithoutOverwrite(entry.filteredImagePath, candidate.imagePath, rollbackError);
+            moveFileWithoutOverwrite(entry.filteredLabelPath, candidate.labelPath, rollbackError);
+            progress.close();
+            QMessageBox::critical(QApplication::activeWindow(), tr("筛选清单写入失败"), error);
+            break;
+        }
+        progress.setValue(index + 1);
+        progress.setLabelText(tr("正在移动匹配样本 %1/%2").arg(index + 1).arg(candidates.size()));
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    }
+    progress.close();
+
+    if (entries.isEmpty())
+        return;
+    ui::FilterReviewDialog review(filteringRoot, entries, QApplication::activeWindow());
+    review.exec();
+    currentDataSet = DataSet::Auto;
+    openDir(imageDir);
+}
+// 文件系统模型异步加载完成后，继续尝试打开第一张图片。
 void FileService::selectFirst(const QString& path) {
     if (pendingDir_.isEmpty()) {
         emit busy(false);
@@ -297,11 +603,12 @@ void FileService::selectFirst(const QString& path) {
     if (!(path == pendingDir_ || path.startsWith(pendingDir_ + '/'))) {
         return;
     };
-    if (formatDetectionAttempted_)
+    if (formatDetectionAttempted_) {
+        if (formatDetectionFinished_)
+            tryOpenFirstAfterLoaded(pendingDir_);
         return;
-    if (tryImportDataSetAfterLoaded()) {
-        tryOpenFirstAfterLoaded(pendingDir_);
     }
+    startPendingImport();
 }
 // BFS 找第一张图片（跨多层）
 QModelIndex FileService::findFirstImageUnder(const QModelIndex& proxyRoot) const {
@@ -355,8 +662,9 @@ bool FileService::openFileAt(const QModelIndex& proxyIndex) {
 
     currentImagePath_ = path;       // 记住路径（保存时用）
     currentImageSize_ = img.size(); // 记住尺寸（保存/反归一化）
-    saveLastVisited(path);
-    const QString lbl = labelFileForImage(path);
+    if (!conflictMode_)
+        saveLastVisited(path);
+    const QString lbl = conflictMode_ ? stageLabelForImage(path) : labelFileForImage(path);
     if (QFile::exists(lbl)) {
         QFile labelFile(lbl);
         if (labelFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -370,7 +678,39 @@ bool FileService::openFileAt(const QModelIndex& proxyIndex) {
             emit labelTextChanged(labelText);
             labelFile.close();
         }
-        QVector<Armor> armors = readLabelFile(lbl, currentImageSize_, currentDataSet);
+        QVector<Armor> armors;
+        if (conflictMode_) {
+            DataSet sourceFormat = DataSet::UnionSecret;
+            for (const StageEntry& entry : stageEntries_) {
+                if (QDir::cleanPath(entry.stageImagePath) == QDir::cleanPath(path)) {
+                    if (entry.sourceFormat != DataSet::Auto)
+                        sourceFormat = entry.sourceFormat;
+                    break;
+                }
+            }
+            QString readError;
+            if (labelmaster::service::label_format::readLabelFile(
+                    lbl, currentImageSize_, DataSet::LabelMasterV6, armors, &readError)) {
+                emit status(tr("冲突标签已是 LabelMaster V6，保存或重新进入时可直接归位"), 4000);
+            } else {
+                QStringList lineErrors;
+                readError.clear();
+                if (!labelmaster::service::label_format::readLabelFileLenient(
+                        lbl, currentImageSize_, sourceFormat, armors, lineErrors, &readError)) {
+                    LOGE(QString("stage 标签读取失败：%1：%2").arg(lbl, readError));
+                    emit status(
+                        tr("冲突标签无法读取，将以空标注打开：%1").arg(readError), 5000);
+                } else if (!lineErrors.isEmpty()) {
+                    emit status(
+                        tr("冲突模式：保留了 %1 个有效标注，需修复 %2 个错误行")
+                            .arg(armors.size())
+                            .arg(lineErrors.size()),
+                        5000);
+                }
+            }
+        } else {
+            armors = readLabelFile(lbl, currentImageSize_, currentDataSet);
+        }
         emit labelsLoaded(armors);
     } else {
         emit labelTextChanged("");
@@ -402,7 +742,10 @@ void FileService::next(bool allowAutoSave) {
         if (s.isValid() && !fsModel_->isDir(s) && isImageFile(fsModel_->filePath(s))) {
             if (controller::AppSettings::instance().autoSave() && allowAutoSave) {
                 // 自动保存当前标注
+                const bool resolvingConflict = conflictMode_;
                 emit saveRequested();
+                if (resolvingConflict)
+                    return;
             }
             proxyCurrent_ = idx;
             emit currentIndexChanged(proxyCurrent_);
@@ -426,7 +769,10 @@ void FileService::prev() {
         if (s.isValid() && !fsModel_->isDir(s) && isImageFile(fsModel_->filePath(s))) {
             if (controller::AppSettings::instance().autoSave()) {
                 // 自动保存当前标注
+                const bool resolvingConflict = conflictMode_;
                 emit saveRequested();
+                if (resolvingConflict)
+                    return;
             }
             proxyCurrent_ = idx;
             emit currentIndexChanged(proxyCurrent_);
@@ -439,6 +785,10 @@ void FileService::prev() {
 
 // ---------- 删除 ----------
 void FileService::deleteCurrent() {
+    if (conflictMode_) {
+        emit status(tr("冲突处理模式不能删除样本；请保存修复结果或使用强制合并"), 4000);
+        return;
+    }
     if (!proxyCurrent_.isValid())
         return;
     const QModelIndex s = mapFromProxyToSource(proxyCurrent_);
@@ -464,19 +814,193 @@ void FileService::deleteCurrent() {
 }
 
 // ---------- 目录打开 ----------
+QString FileService::dataSetRootForImageDir(const QString& imageDir) const {
+    const QDir dir(QDir::cleanPath(imageDir));
+    const QString name = QFileInfo(dir.absolutePath()).fileName().toLower();
+    if (name == QStringLiteral("images") || name == QStringLiteral("image")
+        || name == QStringLiteral("imgs") || name == QStringLiteral("img")) {
+        QDir parent(dir.absolutePath());
+        parent.cdUp();
+        if (QFileInfo(parent.absolutePath())
+                .fileName()
+                .compare(QStringLiteral("stage"), Qt::CaseInsensitive)
+            == 0) {
+            parent.cdUp();
+        }
+        return QDir::cleanPath(parent.absolutePath());
+    }
+    return QDir::cleanPath(dir.absolutePath());
+}
+
+QString FileService::stageLabelForImage(const QString& stageImagePath) const {
+    const QString relative = QDir(stageImagesDir_).relativeFilePath(stageImagePath);
+    QFileInfo relativeInfo(relative);
+    QString labelRelative = relativeInfo.path() == QStringLiteral(".")
+                              ? relativeInfo.completeBaseName() + QStringLiteral(".txt")
+                              : relativeInfo.path() + QLatin1Char('/')
+                                    + relativeInfo.completeBaseName() + QStringLiteral(".txt");
+    return QDir::cleanPath(QDir(stageLabelsDir_).filePath(labelRelative));
+}
+
+bool FileService::saveStageManifest(QString* error) const {
+    if (stageRoot_.isEmpty())
+        return true;
+    if (!QDir().mkpath(stageRoot_)) {
+        if (error)
+            *error = tr("无法创建 stage 目录：%1").arg(stageRoot_);
+        return false;
+    }
+
+    QJsonObject root;
+    root.insert(QStringLiteral("version"), 1);
+    root.insert(QStringLiteral("originalImageDir"), originalImageDir_);
+    QJsonArray entries;
+    for (const StageEntry& entry : stageEntries_) {
+        QJsonObject object;
+        object.insert(QStringLiteral("stageImagePath"), entry.stageImagePath);
+        object.insert(QStringLiteral("stageLabelPath"), entry.stageLabelPath);
+        object.insert(QStringLiteral("originalImagePath"), entry.originalImagePath);
+        object.insert(QStringLiteral("originalLabelPath"), entry.originalLabelPath);
+        object.insert(QStringLiteral("error"), entry.error);
+        object.insert(QStringLiteral("sourceFormat"), static_cast<int>(entry.sourceFormat));
+        entries.push_back(object);
+    }
+    root.insert(QStringLiteral("entries"), entries);
+
+    QSaveFile file(QDir(stageRoot_).filePath(QStringLiteral("manifest.json")));
+    if (!file.open(QIODevice::WriteOnly)) {
+        if (error)
+            *error = tr("无法写入 stage 清单：%1").arg(file.errorString());
+        return false;
+    }
+    file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    if (!file.commit()) {
+        if (error)
+            *error = tr("无法提交 stage 清单：%1").arg(file.errorString());
+        return false;
+    }
+    return true;
+}
+
+bool FileService::loadStageManifest() {
+    stageEntries_.clear();
+    QFile file(QDir(stageRoot_).filePath(QStringLiteral("manifest.json")));
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        LOGE(QString("stage 清单损坏：%1").arg(parseError.errorString()));
+        return false;
+    }
+    const QJsonObject root         = document.object();
+    const QString savedOriginalDir = root.value(QStringLiteral("originalImageDir")).toString();
+    if (!savedOriginalDir.isEmpty())
+        originalImageDir_ = QDir::cleanPath(savedOriginalDir);
+    for (const QJsonValue& value : root.value(QStringLiteral("entries")).toArray()) {
+        const QJsonObject object = value.toObject();
+        StageEntry entry;
+        entry.stageImagePath    = object.value(QStringLiteral("stageImagePath")).toString();
+        entry.stageLabelPath    = object.value(QStringLiteral("stageLabelPath")).toString();
+        entry.originalImagePath = object.value(QStringLiteral("originalImagePath")).toString();
+        entry.originalLabelPath = object.value(QStringLiteral("originalLabelPath")).toString();
+        entry.error             = object.value(QStringLiteral("error")).toString();
+        const int formatValue =
+            object.value(QStringLiteral("sourceFormat")).toInt(static_cast<int>(DataSet::Auto));
+        if (formatValue >= static_cast<int>(DataSet::LabelMaster)
+            && formatValue <= static_cast<int>(DataSet::UnionSecret)) {
+            entry.sourceFormat = static_cast<DataSet>(formatValue);
+        }
+        if (!entry.stageImagePath.isEmpty())
+            stageEntries_.push_back(entry);
+    }
+    return true;
+}
+
+bool FileService::maybeEnterExistingStage(const QString& imageDir) {
+    if (conflictMode_)
+        return false;
+    originalImageDir_ = QDir::cleanPath(imageDir);
+    stageRoot_        = QDir(dataSetRootForImageDir(imageDir)).filePath(QStringLiteral("stage"));
+    stageImagesDir_   = QDir(stageRoot_).filePath(QStringLiteral("images"));
+    stageLabelsDir_   = QDir(stageRoot_).filePath(QStringLiteral("labels"));
+    if (!QFileInfo(stageImagesDir_).isDir() || !directoryContainsImage(stageImagesDir_))
+        return false;
+
+    loadStageManifest();
+    conflictMode_  = true;
+    currentDataSet = DataSet::LabelMasterV6;
+    controller::AppSettings::instance().setoutputFormat(
+        static_cast<int>(LabelOutputFormat::LabelMasterV6));
+    int remaining = 0;
+    QDirIterator iterator(stageImagesDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        iterator.next();
+        ++remaining;
+    }
+    emit conflictModeChanged(true, remaining);
+    emit status(tr("检测到未处理的 stage，进入冲突处理模式"), 5000);
+    return true;
+}
+
+bool FileService::stageInvalidSample(
+    const labelmaster::service::label_format::LabelFileSample& sample, DataSet sourceFormat,
+    const QString& sampleError, QString& operationError) {
+    if (sample.imagePath.isEmpty() || originalImageDir_.isEmpty()) {
+        operationError = tr("无法确定冲突样本的原始图片路径");
+        return false;
+    }
+    QDir().mkpath(stageImagesDir_);
+    QDir().mkpath(stageLabelsDir_);
+
+    const QString relativeImage = QDir(originalImageDir_).relativeFilePath(sample.imagePath);
+    const QString stagedImage   = QDir::cleanPath(QDir(stageImagesDir_).filePath(relativeImage));
+    const QString stagedLabel   = stageLabelForImage(stagedImage);
+
+    if (!moveFileWithoutOverwrite(sample.path, stagedLabel, operationError))
+        return false;
+    if (!moveFileWithoutOverwrite(sample.imagePath, stagedImage, operationError)) {
+        QString rollbackError;
+        moveFileWithoutOverwrite(stagedLabel, sample.path, rollbackError);
+        return false;
+    }
+
+    StageEntry entry;
+    entry.stageImagePath    = stagedImage;
+    entry.stageLabelPath    = stagedLabel;
+    entry.originalImagePath = sample.imagePath;
+    entry.originalLabelPath = sample.path;
+    entry.error             = sampleError;
+    entry.sourceFormat      = sourceFormat;
+    stageEntries_.push_back(entry);
+    if (!saveStageManifest(&operationError)) {
+        stageEntries_.removeLast();
+        QString rollbackError;
+        moveFileWithoutOverwrite(stagedImage, sample.imagePath, rollbackError);
+        moveFileWithoutOverwrite(stagedLabel, sample.path, rollbackError);
+        return false;
+    }
+    return true;
+}
+
 bool FileService::openDir(const QString& dir) {
+    const QString cleanDir = QDir::cleanPath(dir);
+    if (!conflictMode_ && maybeEnterExistingStage(cleanDir))
+        return openDir(stageImagesDir_);
+
     emit busy(true);
 
-    QString lastDir = fsModel_->rootPath();
-    pendingDir_     = dir; // 不清空 pendingTargetPath_，以便恢复时指定目标文件
+    QString lastDir           = fsModel_->rootPath();
+    pendingDir_               = cleanDir; // 不清空 pendingTargetPath_，以便恢复时指定目标文件
     formatDetectionAttempted_ = false;
-    if (lastDir == dir) {
-        LOGI(QString("重新扫描已打开目录：%1").arg(dir));
-        if (tryImportDataSetAfterLoaded())
-            tryOpenFirstAfterLoaded(dir);
+    formatDetectionFinished_  = false;
+    pendingImageCount_        = -1;
+    if (lastDir == cleanDir) {
+        LOGI(QString("重新扫描已打开目录：%1").arg(cleanDir));
+        QTimer::singleShot(0, this, &FileService::startPendingImport);
         return true;
     }
-    const QModelIndex srcRoot = fsModel_->setRootPath(dir);                        // 异步开始
+    const QModelIndex srcRoot = fsModel_->setRootPath(cleanDir); // 异步开始
     if (!srcRoot.isValid()) {
         LOGW(QString("无效目录：%1").arg(dir));
         emit busy(false);
@@ -488,8 +1012,14 @@ bool FileService::openDir(const QString& dir) {
         emit rootChanged(proxyRoot_);
     }
 
-    emit status(tr("打开目录：%1").arg(dir));
-    LOGI(QString("打开目录：%1").arg(dir));
+    emit status(tr("打开目录：%1").arg(cleanDir));
+    LOGI(QString("打开目录：%1").arg(cleanDir));
+    // 数据集扫描不依赖 QFileSystemModel。立即排入事件循环，避免等待目录树加载完成后
+    // 才出现进度对话框。
+    QTimer::singleShot(0, this, [this, cleanDir] {
+        if (pendingDir_ == cleanDir)
+            startPendingImport();
+    });
     return true;
 }
 
@@ -514,8 +1044,82 @@ bool FileService::setProxyRoot(const QString& dir) {
         return false;
     return true;
 }
-bool FileService::tryImportDataSetAfterLoaded() {
+void FileService::startPendingImport() {
+    if (pendingDir_.isEmpty() || formatDetectionAttempted_)
+        return;
+
     formatDetectionAttempted_ = true;
+    const QString dir         = pendingDir_;
+    const bool succeeded      = tryImportPendingDataSet();
+    formatDetectionFinished_  = true;
+    if (!succeeded) {
+        if (pendingDir_ == dir)
+            pendingDir_.clear();
+        return;
+    }
+    if (pendingDir_ == dir)
+        tryOpenFirstAfterLoaded(dir);
+}
+
+bool FileService::tryImportPendingDataSet() {
+    if (conflictMode_ && QDir::cleanPath(pendingDir_) == QDir::cleanPath(stageImagesDir_)) {
+        QStringList stageImages;
+        QDirIterator iterator(stageImagesDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+        while (iterator.hasNext())
+            stageImages.push_back(iterator.next());
+
+        int alreadyV6Count = 0;
+        int importedCount  = 0;
+        int autoErrorCount = 0;
+        for (const QString& stageImage : stageImages) {
+            bool resolved  = false;
+            bool converted = false;
+            QString error;
+            if (!tryAutoResolveConflict(stageImage, resolved, converted, error)) {
+                ++autoErrorCount;
+                LOGW(QString("stage 自动校验失败：%1：%2").arg(stageImage, error));
+                continue;
+            }
+            if (!resolved)
+                continue;
+            if (converted)
+                ++importedCount;
+            else
+                ++alreadyV6Count;
+        }
+
+        int count = 0;
+        QDirIterator remainingIterator(
+            stageImagesDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+        while (remainingIterator.hasNext()) {
+            remainingIterator.next();
+            ++count;
+        }
+        pendingImageCount_ = count;
+        currentDataSet     = DataSet::LabelMasterV6;
+        controller::AppSettings::instance().setoutputFormat(
+            static_cast<int>(LabelOutputFormat::LabelMasterV6));
+
+        if (alreadyV6Count > 0 || importedCount > 0) {
+            emit status(
+                tr("stage 自动处理：%1 个 V6 原样归位，%2 个导入格式已转为 V6；剩余 %3 个冲突")
+                    .arg(alreadyV6Count)
+                    .arg(importedCount)
+                    .arg(count),
+                6000);
+        } else if (autoErrorCount > 0) {
+            emit status(tr("stage 中有 %1 个文件自动处理失败，已保留供手动处理")
+                            .arg(autoErrorCount),
+                        6000);
+        }
+
+        if (count == 0) {
+            finishConflictModeIfEmpty();
+            return false;
+        }
+        emit conflictModeChanged(true, count);
+        return true;
+    }
 
     QProgressDialog progressDialog(QApplication::activeWindow());
     progressDialog.setWindowTitle(tr("数据集格式"));
@@ -527,6 +1131,8 @@ bool FileService::tryImportDataSetAfterLoaded() {
     progressDialog.setAutoReset(false);
     progressDialog.setWindowModality(Qt::ApplicationModal);
     progressDialog.show();
+    progressDialog.raise();
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
     const auto refreshProgress = [] {
         QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
@@ -545,15 +1151,17 @@ bool FileService::tryImportDataSetAfterLoaded() {
 
     QVector<labelmaster::service::label_format::LabelFileSample> samples;
     QSet<QString> visitedLabels;
-    QDirIterator detectionIterator(
-        pendingDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+    QDirIterator detectionIterator(pendingDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+    QElapsedTimer scanRefreshTimer;
+    scanRefreshTimer.start();
     int scannedImages = 0;
     while (detectionIterator.hasNext()) {
         const QString imagePath = detectionIterator.next();
         ++scannedImages;
-        if (scannedImages % 25 == 0) {
+        if (scannedImages == 1 || scanRefreshTimer.elapsed() >= 50) {
             progressDialog.setLabelText(tr("正在扫描图片 %1").arg(scannedImages));
             refreshProgress();
+            scanRefreshTimer.restart();
         }
 
         const QString labelPath = labelFileForImage(imagePath);
@@ -567,19 +1175,48 @@ bool FileService::tryImportDataSetAfterLoaded() {
             closeProgress();
             emit busy(false);
             emit status(
-                tr("格式识别失败：无法读取图片尺寸 %1").arg(QFileInfo(imagePath).fileName()),
-                4000);
+                tr("格式识别失败：无法读取图片尺寸 %1").arg(QFileInfo(imagePath).fileName()), 4000);
             return false;
         }
-        samples.push_back({labelPath, imageSize});
+        samples.push_back({labelPath, imageSize, imagePath});
     }
+    pendingImageCount_ = scannedImages;
 
     const int sampleCount = static_cast<int>(samples.size());
     updateProgress(tr("正在验证数据集格式"), 0, sampleCount);
-    const auto detection = labelmaster::service::label_format::detectDataSetFormat(
-        samples, [&](int current, int total) {
-            updateProgress(tr("正在验证数据集格式"), current, total);
-        });
+    auto detection = labelmaster::service::label_format::detectDataSetFormat(
+        samples,
+        [&](int current, int total) { updateProgress(tr("正在验证数据集格式"), current, total); });
+    if (detection.v1UpcChoiceRequired) {
+        closeProgress();
+        DataSet selectedFormat = DataSet::LabelMaster;
+        if (!chooseV1OrUpcFormat(QApplication::activeWindow(), selectedFormat)) {
+            emit busy(false);
+            emit status(tr("V1/UPC 格式未选择，未修改任何标签"), 4000);
+            return false;
+        }
+        detection.format              = selectedFormat;
+        detection.v1UpcChoiceRequired = false;
+        progressDialog.setLabelText(tr("正在转换数据集格式..."));
+        progressDialog.show();
+        progressDialog.raise();
+        refreshProgress();
+    }
+    if (detection.nineFieldChoiceRequired) {
+        closeProgress();
+        DataSet selectedFormat = DataSet::UnionSecret;
+        if (!chooseNineFieldFormat(QApplication::activeWindow(), selectedFormat)) {
+            emit busy(false);
+            emit status(tr("9 字段类别编码未选择，未修改任何标签"), 4000);
+            return false;
+        }
+        detection.format                  = selectedFormat;
+        detection.nineFieldChoiceRequired = false;
+        progressDialog.setLabelText(tr("正在转换数据集格式..."));
+        progressDialog.show();
+        progressDialog.raise();
+        refreshProgress();
+    }
     if (!detection.succeeded()) {
         closeProgress();
         emit busy(false);
@@ -590,92 +1227,113 @@ bool FileService::tryImportDataSetAfterLoaded() {
     }
 
     currentDataSet = detection.format;
-    PoseClassScheme poseScheme = detection.poseClassScheme;
-    controller::AppSettings::instance().setv6ClassScheme(static_cast<int>(poseScheme));
 
-    if (isDirectOpenFormat(currentDataSet)) {
-        const LabelOutputFormat directFormat = currentDataSet == DataSet::LabelMasterV6
-            ? LabelOutputFormat::LabelMasterV6
-            : LabelOutputFormat::LabelMasterV4;
-        controller::AppSettings::instance().setoutputFormat(static_cast<int>(directFormat));
-        emit status(
-            detection.hasAnnotations
-                ? tr("自动识别为 %1，直接打开")
-                      .arg(labelmaster::service::label_format::dataSetName(currentDataSet))
-                : tr("未发现非空标签，默认使用 LabelMaster V6"),
-            3000);
-        closeProgress();
-        return true;
-    }
-
+    const bool directOpen = isDirectOpenFormat(currentDataSet);
     const LabelOutputFormat targetFormat = canonicalOutputFormat(currentDataSet);
     struct PendingConversion {
         QString labelPath;
         QSize imageSize;
         QVector<Armor> armors;
     };
+    struct PendingConflict {
+        labelmaster::service::label_format::LabelFileSample sample;
+        QString error;
+    };
     QVector<PendingConversion> conversions;
+    QVector<PendingConflict> conflicts;
 
     // First parse every source file. A malformed label therefore cannot be replaced
     // with an empty or partially converted file.
-    QDirIterator iterator(pendingDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
-    QSet<QString> conversionLabels;
     int parsedLabels = 0;
-    while (iterator.hasNext()) {
-        const QString imagePath = iterator.next();
-        const QString labelPath = labelFileForImage(imagePath);
-        if (!QFile::exists(labelPath) || conversionLabels.contains(labelPath))
-            continue;
-        conversionLabels.insert(labelPath);
-
-        QImageReader reader(imagePath);
-        const QSize imageSize = reader.size();
-        if (imageSize.isEmpty()) {
-            closeProgress();
-            emit busy(false);
-            emit status(tr("导入失败：无法读取图片尺寸 %1").arg(QFileInfo(imagePath).fileName()), 3000);
-            return false;
-        }
-
-        PendingConversion conversion{labelPath, imageSize, {}};
+    for (const auto& sample : samples) {
+        PendingConversion conversion{sample.path, sample.imageSize, {}};
         QString error;
         if (!labelmaster::service::label_format::readLabelFile(
-                labelPath, imageSize, currentDataSet, conversion.armors, &error, poseScheme)) {
-            closeProgress();
-            emit busy(false);
-            emit status(tr("导入失败：%1：%2").arg(QFileInfo(labelPath).fileName(), error), 5000);
-            LOGE(QString("导入失败：%1：%2").arg(labelPath, error));
-            return false;
+                sample.path, sample.imageSize, currentDataSet, conversion.armors, &error)) {
+            conflicts.push_back({sample, error});
+            LOGW(QString("标签将移入 stage：%1：%2").arg(sample.path, error));
+        } else {
+            conversions.push_back(conversion);
         }
-        conversions.push_back(conversion);
         ++parsedLabels;
         updateProgress(tr("正在转换数据集格式"), parsedLabels, sampleCount);
     }
 
     const int conversionCount = static_cast<int>(conversions.size());
-    int writtenLabels = 0;
+    int writtenLabels         = 0;
     for (const PendingConversion& conversion : conversions) {
-        QString error;
-        if (!labelmaster::service::label_format::writeLabelFile(
-                conversion.labelPath, conversion.imageSize, targetFormat,
-                conversion.armors, &error, poseScheme)) {
-            closeProgress();
-            emit busy(false);
-            emit status(
-                tr("导入写入失败：%1：%2")
-                    .arg(QFileInfo(conversion.labelPath).fileName(), error),
-                5000);
-            LOGE(QString("导入写入失败：%1：%2").arg(conversion.labelPath, error));
-            return false;
+        if (!directOpen) {
+            QString error;
+            if (!labelmaster::service::label_format::writeLabelFile(
+                    conversion.labelPath, conversion.imageSize, targetFormat, conversion.armors,
+                    &error)) {
+                closeProgress();
+                emit busy(false);
+                emit status(
+                    tr("导入写入失败：%1：%2")
+                        .arg(QFileInfo(conversion.labelPath).fileName(), error),
+                    5000);
+                LOGE(QString("导入写入失败：%1：%2").arg(conversion.labelPath, error));
+                return false;
+            }
         }
         ++writtenLabels;
-        updateProgress(tr("正在写入转换结果"), writtenLabels, conversionCount);
+        updateProgress(
+            directOpen ? tr("正在校验 LabelMaster V6") : tr("正在写入转换结果"), writtenLabels,
+            conversionCount);
     }
 
-    currentDataSet = targetFormat == LabelOutputFormat::LabelMasterV6
-        ? DataSet::LabelMasterV6
-        : DataSet::LabelMasterV4;
+    if (!conflicts.isEmpty()) {
+        originalImageDir_ = QDir::cleanPath(pendingDir_);
+        stageRoot_ =
+            QDir(dataSetRootForImageDir(originalImageDir_)).filePath(QStringLiteral("stage"));
+        stageImagesDir_ = QDir(stageRoot_).filePath(QStringLiteral("images"));
+        stageLabelsDir_ = QDir(stageRoot_).filePath(QStringLiteral("labels"));
+        loadStageManifest();
+
+        int stagedCount = 0;
+        for (const PendingConflict& conflict : conflicts) {
+            QString operationError;
+            if (!stageInvalidSample(
+                    conflict.sample, currentDataSet, conflict.error, operationError)) {
+                closeProgress();
+                emit busy(false);
+                emit status(tr("无法隔离冲突标签：%1").arg(operationError), 6000);
+                LOGE(QString("无法隔离冲突标签：%1").arg(operationError));
+                return false;
+            }
+            ++stagedCount;
+            updateProgress(tr("正在隔离冲突标签"), stagedCount, conflicts.size());
+        }
+
+        currentDataSet = DataSet::LabelMasterV6;
+        controller::AppSettings::instance().setoutputFormat(
+            static_cast<int>(LabelOutputFormat::LabelMasterV6));
+        conflictMode_ = true;
+        pendingTargetPath_.clear();
+        closeProgress();
+        emit conflictModeChanged(true, stageEntries_.size());
+        emit status(
+            (directOpen ? tr("已校验 %1 个 V6 标签；%2 个冲突样本进入 stage")
+                        : tr("已转换 %1 个标签；%2 个冲突样本进入 stage"))
+                .arg(conversions.size())
+                .arg(stagedCount),
+            6000);
+        openDir(stageImagesDir_);
+        return false;
+    }
+
+    currentDataSet = DataSet::LabelMasterV6;
     controller::AppSettings::instance().setoutputFormat(static_cast<int>(targetFormat));
+    if (directOpen) {
+        emit status(
+            detection.hasAnnotations
+                ? tr("自动识别为 LabelMaster V6；已逐文件校验并直接打开")
+                : tr("未发现非空标签，默认使用 LabelMaster V6"),
+            3000);
+        closeProgress();
+        return true;
+    }
     emit status(
         tr("自动识别为 %1；已将 %2 个标签转换为 %3")
             .arg(labelmaster::service::label_format::dataSetName(detection.format))
@@ -860,11 +1518,11 @@ bool FileService::tryImportDataSetAfterLoaded() {
                     labelFile.close();
                     if (labelFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
                         QTextStream outStream(&labelFile);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+# if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
                         outStream.setEncoding(QStringConverter::Utf8);
-#else
+# else
                         outStream.setCodec("UTF-8");
-#endif
+# endif
                         outStream << Text;
                         // File closed by destructor
                     }
@@ -880,8 +1538,13 @@ bool FileService::tryImportDataSetAfterLoaded() {
 }
 void FileService::tryOpenFirstAfterLoaded(const QString& dir) {
     if (!setProxyRoot(dir)) {
-        emit busy(false);
-        pendingDir_.clear();
+        // 格式扫描可能早于 QFileSystemModel 完成。目录确实没有图片时可以立即结束；
+        // 否则等待后续 directoryLoaded 信号再次尝试。
+        if (formatDetectionFinished_ && pendingImageCount_ == 0) {
+            emit status(tr("目录下未找到图片"), 1200);
+            emit busy(false);
+            pendingDir_.clear();
+        }
         return;
     };
     // 优先：若指定了目标文件（比如恢复上次图片）
@@ -910,6 +1573,8 @@ void FileService::tryOpenFirstAfterLoaded(const QString& dir) {
         emit busy(false);
         pendingDir_.clear();
     } else {
+        if (pendingImageCount_ > 0)
+            return;
         LOGW(QString("目录下未找到图片：%1").arg(dir));
         emit status(tr("目录下未找到图片"), 1200);
         emit busy(false);
@@ -952,6 +1617,10 @@ bool FileService::isImageFile(const QString& path) const {
 void FileService::openPaths(const QStringList& paths) {
     if (paths.isEmpty())
         return;
+    if (conflictMode_) {
+        emit status(tr("请先处理完 stage 中的冲突样本"), 5000);
+        return;
+    }
 
     QString dir;
     pendingTargetPath_.clear();
@@ -1027,8 +1696,7 @@ QString FileService::labelFileForImage(const QString& imagePath) {
         return QDir::cleanPath(QDir(dirPath).absoluteFilePath(labelFileName));
     };
 
-    if (configuredDir.isEmpty()
-        || configuredDir == QStringLiteral("label")
+    if (configuredDir.isEmpty() || configuredDir == QStringLiteral("label")
         || configuredDir == QStringLiteral("labels")) {
         QStringList candidateDirs;
         if (configuredDir == QStringLiteral("labels")) {
@@ -1053,8 +1721,8 @@ QString FileService::labelFileForImage(const QString& imagePath) {
         }
 
         const QString fallbackName = configuredDir == QStringLiteral("labels")
-            ? QStringLiteral("labels")
-            : QStringLiteral("label");
+                                       ? QStringLiteral("labels")
+                                       : QStringLiteral("label");
         return labelPathIn(imageParent.filePath(fallbackName));
     }
 
@@ -1062,9 +1730,9 @@ QString FileService::labelFileForImage(const QString& imagePath) {
     if (labelDir.isAbsolute())
         return labelPathIn(labelDir.absolutePath());
 
-    const QString parentCandidate = QDir::cleanPath(imageParent.filePath(configuredDir));
+    const QString parentCandidate   = QDir::cleanPath(imageParent.filePath(configuredDir));
     const QString imageDirCandidate = QDir::cleanPath(imageDir.filePath(configuredDir));
-    const QString parentLabelPath = labelPathIn(parentCandidate);
+    const QString parentLabelPath   = labelPathIn(parentCandidate);
     const QString imageDirLabelPath = labelPathIn(imageDirCandidate);
     if (QFile::exists(parentLabelPath))
         return parentLabelPath;
@@ -1080,16 +1748,14 @@ QString FileService::labelFileForImage(const QString& imagePath) {
 bool FileService::writeLabelFile(
     const QString& labelPath, const QVector<Armor>& armors, const QSize& imgSize) {
     const int configured = controller::AppSettings::instance().outputFormat();
-    const LabelOutputFormat format = configured >= static_cast<int>(LabelOutputFormat::Points11)
-            && configured <= static_cast<int>(LabelOutputFormat::LabelMasterV6)
-        ? static_cast<LabelOutputFormat>(configured)
-        : LabelOutputFormat::LabelMasterV6;
-    const PoseClassScheme poseScheme = controller::AppSettings::instance().v6ClassScheme() == 14
-        ? PoseClassScheme::Classes14
-        : PoseClassScheme::Classes36;
+    const LabelOutputFormat format =
+        configured >= static_cast<int>(LabelOutputFormat::Points11)
+                && configured <= static_cast<int>(LabelOutputFormat::LabelMasterV6)
+            ? static_cast<LabelOutputFormat>(configured)
+            : LabelOutputFormat::LabelMasterV6;
     QString error;
     const bool written = labelmaster::service::label_format::writeLabelFile(
-        labelPath, imgSize, format, armors, &error, poseScheme);
+        labelPath, imgSize, format, armors, &error);
     if (!written)
         LOGE(QString("标签写入失败：%1：%2").arg(labelPath, error));
     return written;
@@ -1104,11 +1770,11 @@ bool FileService::writeLabelFile(
         return false;
 
     QTextStream ts(&f);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+# if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     ts.setEncoding(QStringConverter::Utf8);
-#else
+# else
     ts.setCodec("UTF-8");
-#endif
+# endif
     ts.setRealNumberNotation(QTextStream::FixedNotation);
     ts.setRealNumberPrecision(6); // 保留 6 位小数
 
@@ -1280,16 +1946,13 @@ bool FileService::writeLabelFile(
 #endif
 }
 
-QVector<Armor> FileService::readLabelFile(
-    const QString& labelPath, const QSize& imgSize, DataSet format) {
+QVector<Armor>
+    FileService::readLabelFile(const QString& labelPath, const QSize& imgSize, DataSet format) {
     {
         QVector<Armor> parsed;
         QString error;
         if (!labelmaster::service::label_format::readLabelFile(
-                labelPath, imgSize, format, parsed, &error,
-                controller::AppSettings::instance().v6ClassScheme() == 14
-                    ? PoseClassScheme::Classes14
-                    : PoseClassScheme::Classes36)) {
+                labelPath, imgSize, format, parsed, &error)) {
             LOGE(QString("标签读取失败：%1：%2").arg(labelPath, error));
             return {};
         }
@@ -1306,11 +1969,11 @@ QVector<Armor> FileService::readLabelFile(
     const double H = double(imgSize.height());
 
     QTextStream ts(&f);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+# if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     ts.setEncoding(QStringConverter::Utf8);
-#else
+# else
     ts.setCodec("UTF-8");
-#endif
+# endif
     while (!ts.atEnd()) {
         QString raw = ts.readLine();
         int hash    = raw.indexOf('#');
@@ -1470,6 +2133,191 @@ QVector<Armor> FileService::readLabelFile(
 }
 
 // ---------- 保存标注（对外槽） ----------
+bool FileService::tryAutoResolveConflict(
+    const QString& stageImagePath, bool& resolved, bool& converted, QString& error) {
+    resolved  = false;
+    converted = false;
+
+    const QString stageImage = QDir::cleanPath(stageImagePath);
+    StageEntry entry;
+    bool found = false;
+    for (const StageEntry& candidate : stageEntries_) {
+        if (QDir::cleanPath(candidate.stageImagePath) == stageImage) {
+            entry = candidate;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        // 没有清单就无法可靠获知“本次导入格式”，但仍可安全识别已经是 V6 的文件。
+        entry.stageImagePath = stageImage;
+        entry.stageLabelPath = stageLabelForImage(stageImage);
+        const QString relative = QDir(stageImagesDir_).relativeFilePath(stageImage);
+        entry.originalImagePath = QDir::cleanPath(QDir(originalImageDir_).filePath(relative));
+        entry.originalLabelPath = labelFileForImage(entry.originalImagePath);
+        entry.sourceFormat = DataSet::Auto;
+    }
+
+    QImageReader reader(stageImage);
+    const QSize imageSize = reader.size();
+    if (imageSize.isEmpty()) {
+        error = tr("无法读取 stage 图片尺寸");
+        return false;
+    }
+
+    QVector<Armor> armors;
+    QString validationError;
+    if (labelmaster::service::label_format::readLabelFile(
+            entry.stageLabelPath, imageSize, DataSet::LabelMasterV6, armors, &validationError)) {
+        if (!restoreConflict(stageImage, false, error))
+            return false;
+        resolved = true;
+        return true;
+    }
+
+    if (entry.sourceFormat == DataSet::Auto || entry.sourceFormat == DataSet::LabelMasterV6)
+        return true;
+
+    armors.clear();
+    validationError.clear();
+    if (!labelmaster::service::label_format::readLabelFile(
+            entry.stageLabelPath, imageSize, entry.sourceFormat, armors, &validationError)) {
+        return true;
+    }
+    if (!labelmaster::service::label_format::writeLabelFile(
+            entry.stageLabelPath, imageSize, LabelOutputFormat::LabelMasterV6, armors, &error)) {
+        return false;
+    }
+
+    QVector<Armor> verification;
+    if (!labelmaster::service::label_format::readLabelFile(
+            entry.stageLabelPath, imageSize, DataSet::LabelMasterV6, verification, &error)) {
+        return false;
+    }
+    if (!restoreConflict(stageImage, false, error))
+        return false;
+    resolved  = true;
+    converted = true;
+    return true;
+}
+
+bool FileService::restoreConflict(const QString& stageImagePath, bool force, QString& error) {
+    const QString stageImage = QDir::cleanPath(stageImagePath);
+    int entryIndex           = -1;
+    StageEntry entry;
+    for (int index = 0; index < stageEntries_.size(); ++index) {
+        if (QDir::cleanPath(stageEntries_[index].stageImagePath) == stageImage) {
+            entryIndex = index;
+            entry      = stageEntries_[index];
+            break;
+        }
+    }
+
+    if (entryIndex < 0) {
+        const QString relative  = QDir(stageImagesDir_).relativeFilePath(stageImage);
+        entry.stageImagePath    = stageImage;
+        entry.stageLabelPath    = stageLabelForImage(stageImage);
+        entry.originalImagePath = QDir::cleanPath(QDir(originalImageDir_).filePath(relative));
+        entry.originalLabelPath = labelFileForImage(entry.originalImagePath);
+    }
+
+    if (!force
+        && (QFile::exists(entry.originalImagePath) || QFile::exists(entry.originalLabelPath))) {
+        error = tr("原目录已存在同名图片或标签，为避免覆盖已停止回迁");
+        return false;
+    }
+
+    if (!copyFileReplacing(entry.stageImagePath, entry.originalImagePath, force, error))
+        return false;
+    if (!copyFileReplacing(entry.stageLabelPath, entry.originalLabelPath, force, error)) {
+        if (!force)
+            QFile::remove(entry.originalImagePath);
+        return false;
+    }
+
+    if (!QFile::remove(entry.stageImagePath)) {
+        error = tr("已复制回原目录，但无法删除 stage 图片：%1").arg(entry.stageImagePath);
+        return false;
+    }
+    if (!QFile::remove(entry.stageLabelPath)) {
+        error = tr("已复制回原目录，但无法删除 stage 标签：%1").arg(entry.stageLabelPath);
+        return false;
+    }
+
+    if (entryIndex >= 0)
+        stageEntries_.removeAt(entryIndex);
+    if (!saveStageManifest(&error))
+        return false;
+    return true;
+}
+
+bool FileService::restoreCurrentConflict(bool force, QString& error) {
+    return restoreConflict(currentImagePath_, force, error);
+}
+
+void FileService::finishConflictModeIfEmpty() {
+    if (!conflictMode_)
+        return;
+    QDirIterator iterator(stageImagesDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+    if (iterator.hasNext()) {
+        int remaining = 0;
+        while (iterator.hasNext()) {
+            iterator.next();
+            ++remaining;
+        }
+        emit conflictModeChanged(true, remaining);
+        return;
+    }
+
+    QFile::remove(QDir(stageRoot_).filePath(QStringLiteral("manifest.json")));
+    QDir().rmdir(stageLabelsDir_);
+    QDir().rmdir(stageImagesDir_);
+    QDir().rmdir(stageRoot_);
+    conflictMode_ = false;
+    stageEntries_.clear();
+    emit conflictModeChanged(false, 0);
+    emit status(tr("所有冲突样本已处理，返回原数据集"), 5000);
+    currentDataSet = DataSet::Auto;
+    pendingTargetPath_.clear();
+    const QString destination = originalImageDir_;
+    originalImageDir_.clear();
+    openDir(destination);
+}
+
+void FileService::refreshConflictDirectory() {
+    finishConflictModeIfEmpty();
+    if (!conflictMode_)
+        return;
+    pendingTargetPath_.clear();
+    currentDataSet = DataSet::LabelMasterV6;
+    openDir(stageImagesDir_);
+}
+
+void FileService::forceMergeCurrentConflict() {
+    if (!conflictMode_ || currentImagePath_.isEmpty())
+        return;
+    QMessageBox box(QApplication::activeWindow());
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("跳过校验并强制合并"));
+    box.setText(tr("当前标签尚未通过导入格式或 LabelMaster V6 校验。"));
+    box.setInformativeText(
+        tr("继续会把 stage 中的原始图片和标签直接复制回数据集，并覆盖同名文件，不会执行导入转换。"
+           "该标签以后可能无法正常打开。"));
+    auto* mergeButton = box.addButton(tr("仍然合并"), QMessageBox::DestructiveRole);
+    box.addButton(QMessageBox::Cancel);
+    box.exec();
+    if (box.clickedButton() != mergeButton)
+        return;
+
+    QString error;
+    if (!restoreCurrentConflict(true, error)) {
+        QMessageBox::critical(QApplication::activeWindow(), tr("强制合并失败"), error);
+        return;
+    }
+    emit status(tr("已跳过导入格式/V6 校验并强制合并当前冲突样本"), 5000);
+    refreshConflictDirectory();
+}
+
 void FileService::saveData(const QVector<Armor>& armors, const QImage& image, bool needSaveImg) {
     if (!pendingDir_.isEmpty()) {
         emit status(tr("目录加载中，稍后保存"), 900);
@@ -1508,10 +2356,44 @@ void FileService::saveData(const QVector<Armor>& armors, const QImage& image, bo
         } else {
             emit status(tr("保存图片失败"), 1200);
             LOGE(QString("保存图片失败：%1").arg(imgPath));
+            if (conflictMode_) {
+                QMessageBox::warning(
+                    QApplication::activeWindow(), tr("冲突样本保存失败"),
+                    tr("无法保存修改后的图片，请修复存储问题后重试。"));
+                return;
+            }
         }
     }
     // 保存标注
-    QString lblPath = labelFileForImage(imgPath);
+    QString lblPath = conflictMode_ ? stageLabelForImage(imgPath) : labelFileForImage(imgPath);
+    if (conflictMode_) {
+        QString error;
+        if (!labelmaster::service::label_format::writeLabelFile(
+                lblPath, sz, LabelOutputFormat::LabelMasterV6, armors, &error)) {
+            QMessageBox::warning(
+                QApplication::activeWindow(), tr("冲突标签仍不合法"),
+                tr("无法保存为 LabelMaster V6：%1\n\n请继续修改标注。").arg(error));
+            emit status(tr("冲突标签未通过 V6 校验，请继续修改"), 5000);
+            return;
+        }
+        QVector<Armor> verification;
+        if (!labelmaster::service::label_format::readLabelFile(
+                lblPath, sz, DataSet::LabelMasterV6, verification, &error)) {
+            QMessageBox::warning(
+                QApplication::activeWindow(), tr("冲突标签仍不合法"),
+                tr("保存后的文件未通过 LabelMaster V6 校验：%1\n\n请继续修改标注。").arg(error));
+            emit status(tr("冲突标签未通过 V6 校验，请继续修改"), 5000);
+            return;
+        }
+        if (!restoreCurrentConflict(false, error)) {
+            QMessageBox::critical(QApplication::activeWindow(), tr("回迁失败"), error);
+            emit status(tr("标签已通过 V6 校验，但回迁原目录失败"), 5000);
+            return;
+        }
+        emit status(tr("冲突标签已通过 V6 校验并放回原数据集"), 5000);
+        refreshConflictDirectory();
+        return;
+    }
     if (writeLabelFile(lblPath, armors, sz)) {
         emit status(tr("已保存标注：%1").arg(QFileInfo(lblPath).fileName()), 900);
         LOGI(QString("保存标注：%1").arg(lblPath));
@@ -1535,14 +2417,13 @@ void FileService::getStas(int colorId, int classId, int sizeId) {
             const QVector<Armor> armors = readLabelFile(labelPath, reader.size(), currentDataSet);
             for (const Armor& armor : armors) {
                 const int colId = IdConvert::colorLetter2Id(armor.color);
-                const int sId = armor.size;
-                const int clsId = IdConvert::classToken2Id(
-                    IdConvert::normalizeClasslToken(armor.cls));
+                const int sId   = armor.size;
+                const int clsId =
+                    IdConvert::classToken2Id(IdConvert::normalizeClasslToken(armor.cls));
                 const auto matches = [](int value, int target) {
                     return target == -1 || value == target;
                 };
-                if (matches(colId, colorId) && matches(sId, sizeId)
-                    && matches(clsId, classId)) {
+                if (matches(colId, colorId) && matches(sId, sizeId) && matches(clsId, classId)) {
                     ++targetCount;
                     hasTarget = true;
                 }

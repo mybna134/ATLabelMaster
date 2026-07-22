@@ -7,8 +7,8 @@
 #include "ui/mainwindow.hpp"
 #include "ui/pixel_widgets/theme_manager.hpp"
 #include <QApplication>
-#include <QFile>
 #include <QDir>
+#include <QFile>
 #include <pthread.h>
 #include <qapplication.h>
 #include <qcoreapplication.h>
@@ -63,42 +63,47 @@ int main(int argc, char* argv[]) {
     QObject::connect(&w, &ui::MainWindow::sigNextRequested, &files, [&]() { files.next(); });
     QObject::connect(&w, &ui::MainWindow::sigPrevRequested, &files, &FileService::prev);
     QObject::connect(&w, &ui::MainWindow::sigDeleteRequested, &files, &FileService::deleteCurrent);
+    QObject::connect(
+        &w, &ui::MainWindow::sigForceMergeConflictRequested, &files,
+        &FileService::forceMergeCurrentConflict);
     QObject::connect(&w, &ui::MainWindow::sigGetStasRequested, &files, &FileService::getStas);
     QObject::connect(
         &w, &ui::MainWindow::sigSettingsRequested, &w, &ui::MainWindow::showSettingDialog);
-    
+    QObject::connect(&w, &ui::MainWindow::sigFilterRequested, &files, &FileService::startFiltering);
+
     QObject::connect(&files, &FileService::modelReady, &w, &ui::MainWindow::setFileModel);
-    
+
     QObject::connect(&files, &FileService::rootChanged, &w, &ui::MainWindow::setRoot); // ★ 新增
-    
+
     QObject::connect(
         &files, &FileService::currentIndexChanged, &w, &ui::MainWindow::setCurrentIndex);
-    
+
     QObject::connect(&files, &FileService::imageReady, &w, &ui::MainWindow::showImage);
-    
+
     QObject::connect(&files, &FileService::status, &w, &ui::MainWindow::setStatus);
-    
+
     QObject::connect(&files, &FileService::busy, &w, &ui::MainWindow::setBusy);
-    
+    QObject::connect(
+        &files, &FileService::conflictModeChanged, &w, &ui::MainWindow::setConflictMode);
+
     QObject::connect(&files, &FileService::StasGetted, &w, &ui::MainWindow::sigStasUpdateRequested);
-    
+
     QObject::connect(&files, &FileService::saveRequested, &w, &ui::MainWindow::sigSaveRequested);
-    
+
     QObject::connect(
         &w, &ui::MainWindow::sigHistEqRequested, w.ui()->label, &ImageCanvas::histEqualize);
     // ImageCanvas <-> SmartDetector 连接 检测和检测结果
-    
+
     QObject::connect(
         w.ui()->label, &ImageCanvas::detectRequested, &detector, &SmartDetector::detect);
-    
+
     QObject::connect(
         &detector, &SmartDetector::detected, w.ui()->label, &ImageCanvas::setDetections);
-    
+
     QObject::connect(
         &files, &FileService::labelsLoaded, w.ui()->label, &ImageCanvas::setDetections);
-    QObject::connect(
-        &files, &FileService::labelTextChanged, &w, &ui::MainWindow::setLabelContent);
-    
+    QObject::connect(&files, &FileService::labelTextChanged, &w, &ui::MainWindow::setLabelContent);
+
     QObject::connect(
         w.ui()->label, &ImageCanvas::annotationsPublished, &files, &FileService::saveData);
     files.exposeModel();

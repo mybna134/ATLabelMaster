@@ -103,7 +103,8 @@ public:
  * @brief LabelMasterV4 format with numeric class id first
  *
  * Format: cls x_c y_c w h x0 y0 x1 y1 x2 y2 x3 y3
- * cls: color * 16 + size * 8 + class
+ * cls: V4 36-class id, color * 9 + tag
+ * tag: G/Big 1/2/3/4/5/O/Small Base/Big Base
  * x_c, y_c, w, h: normalized bounding box (center format) [0,1]
  * x0,y0,x1,y1,x2,y2,x3,y3: normalized four corner points [0,1]
  */

@@ -17,12 +17,14 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QSvgRenderer>
+#include <QTimer>
 #include <QTransform>
 #include <QWheelEvent>
 #include <QtMath>
 #include <algorithm>
-#include <limits>
 #include <array>
+#include <cmath>
+#include <limits>
 #include <opencv2/core.hpp>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/highgui.hpp>
@@ -53,18 +55,17 @@ static QPointF fromJsonPt(const QJsonArray& a) {
 }
 static QJsonObject armorToJson(const Armor& a) {
     QJsonObject o;
-    o["cls"] = a.cls;
-    o["color"] = a.color;
-    o["size"] = a.size;
-    o["left_visible"] = a.leftVisible;
-    o["right_visible"] = a.rightVisible;
+    o["cls"]                 = a.cls;
+    o["color"]               = a.color;
+    o["size"]                = a.size;
     o["keypoint_visibility"] = QJsonArray{
-        a.keypointVisibility[0], a.keypointVisibility[1],
-        a.keypointVisibility[2], a.keypointVisibility[3]};
-    o["p0"]  = toJsonPt(a.p0);
-    o["p1"]  = toJsonPt(a.p1);
-    o["p2"]  = toJsonPt(a.p2);
-    o["p3"]  = toJsonPt(a.p3);
+        a.keypointVisibility[0], a.keypointVisibility[1], a.keypointVisibility[2],
+        a.keypointVisibility[3]};
+    o["p0"]   = toJsonPt(a.p0);
+    o["p1"]   = toJsonPt(a.p1);
+    o["p2"]   = toJsonPt(a.p2);
+    o["p3"]   = toJsonPt(a.p3);
+    o["bbox"] = QJsonArray{a.norm_x, a.norm_y, a.norm_w, a.norm_h};
     return o;
 }
 
@@ -72,20 +73,25 @@ static bool armorFromJson(const QJsonObject& o, Armor& a) {
     if (!o.contains("cls") || !o.contains("p0") || !o.contains("p1") || !o.contains("p2")
         || !o.contains("p3"))
         return false;
-    a.cls = o.value("cls").toString();
-    a.color = o.value("color").toString("G");
-    a.size = o.value("size").toInt();
-    a.leftVisible = o.value("left_visible").toBool(true);
-    a.rightVisible = o.value("right_visible").toBool(true);
+    a.cls                       = o.value("cls").toString();
+    a.color                     = o.value("color").toString("G");
+    a.size                      = o.value("size").toInt();
     const QJsonArray visibility = o.value("keypoint_visibility").toArray();
     if (visibility.size() == 4) {
         for (int i = 0; i < 4; ++i)
             a.keypointVisibility[i] = visibility[i].toInt(2);
     }
-    a.p0  = fromJsonPt(o.value("p0").toArray());
-    a.p1  = fromJsonPt(o.value("p1").toArray());
-    a.p2  = fromJsonPt(o.value("p2").toArray());
-    a.p3  = fromJsonPt(o.value("p3").toArray());
+    a.p0                  = fromJsonPt(o.value("p0").toArray());
+    a.p1                  = fromJsonPt(o.value("p1").toArray());
+    a.p2                  = fromJsonPt(o.value("p2").toArray());
+    a.p3                  = fromJsonPt(o.value("p3").toArray());
+    const QJsonArray bbox = o.value("bbox").toArray();
+    if (bbox.size() == 4) {
+        a.norm_x = bbox[0].toDouble(-1.0);
+        a.norm_y = bbox[1].toDouble(-1.0);
+        a.norm_w = bbox[2].toDouble(-1.0);
+        a.norm_h = bbox[3].toDouble(-1.0);
+    }
     return true;
 }
 
@@ -97,6 +103,12 @@ ImageCanvas::ImageCanvas(QWidget* parent)
     setMinimumSize(100, 80);
     setContextMenuPolicy(Qt::NoContextMenu); // 防止右键被菜单吃掉
     setupSvg();                              // 初始化SVG
+
+    visibilityShortcutTimer_ = new QTimer(this);
+    visibilityShortcutTimer_->setSingleShot(true);
+    connect(
+        visibilityShortcutTimer_, &QTimer::timeout, this,
+        &ImageCanvas::commitPendingVisibilityToggle);
 
     qRegisterMetaType<Armor>("ImageCanvas::Armor");
     qRegisterMetaType<QVector<Armor>>("QVector<ImageCanvas::Armor>");
@@ -121,12 +133,15 @@ void ImageCanvas::setImage(const QImage& img) {
     clearMasks();
     // 切图即清空标注
     clearDetections();
-    selectedIndex_ = -1;
-    hoverIndex_    = -1;
-    draggingRect_  = false;
-    dragHandle_    = -1;
-    hoverHandle_   = -1;
-    dragRectImg_   = QRect();
+    selectedIndex_       = -1;
+    hoverIndex_          = -1;
+    draggingRect_        = false;
+    dragHandle_          = -1;
+    hoverHandle_         = -1;
+    dragBBoxHandle_      = -1;
+    hoverBBoxHandle_     = -1;
+    bboxDragOppositeImg_ = {};
+    dragRectImg_         = QRect();
 
     if (!img_.isNull() && modelInputSize_.isValid() && modelInputSize_ == img_.size()) {
         roiImg_ = QRect(QPoint(0, 0), img_.size());
@@ -195,7 +210,14 @@ void ImageCanvas::requestDetect() {
 /* ===== 外部读写 ===== */
 void ImageCanvas::setDetections(const QVector<Armor>& dets) {
     // qDebug() << "setDetections: " << dets.size();
+    cancelPendingVisibilityShortcut();
     dets_ = dets;
+    if (bboxEditingSupported()) {
+        for (Armor& armor : dets_) {
+            if (armor.norm_w < 0 || armor.norm_h < 0)
+                updateBBoxFromCorners(armor);
+        }
+    }
     if (dets_.isEmpty()) {
         // qDebug() << "setDetections: empty";
         selectedIndex_ = -1;
@@ -209,17 +231,21 @@ void ImageCanvas::setDetections(const QVector<Armor>& dets) {
     update();
 }
 void ImageCanvas::clearDetections() {
+    cancelPendingVisibilityShortcut();
     dets_.clear();
     selectedIndex_ = -1;
     hoverIndex_    = -1;
+    dragHandle_ = hoverHandle_ = -1;
+    dragBBoxHandle_ = hoverBBoxHandle_ = -1;
+    bboxDragOppositeImg_               = {};
     emit detectionSelected(-1);
     emit detectionHovered(-1);
     update();
 }
 void ImageCanvas::addDetection(const Armor& a0) {
     Armor a = a0;
-    // 确保BBox与角点同步
-    updateBBoxFromCorners(a);
+    if (a.norm_w < 0 || a.norm_h < 0)
+        updateBBoxFromCorners(a);
     dets_.append(a);
     const int idx = dets_.size() - 1;
     emit detectionUpdated(idx, dets_.back());
@@ -229,8 +255,8 @@ void ImageCanvas::updateDetection(int index, const Armor& a0) {
     if (index < 0 || index >= dets_.size())
         return;
     dets_[index] = a0;
-    // 确保BBox与角点同步
-    updateBBoxFromCorners(dets_[index]);
+    if (dets_[index].norm_w < 0 || dets_[index].norm_h < 0)
+        updateBBoxFromCorners(dets_[index]);
     emit detectionUpdated(index, dets_[index]);
     update();
 }
@@ -264,6 +290,8 @@ bool ImageCanvas::setSelectedIndex(int idx) {
         return false;
     selectedIndex_ = idx;
     dragHandle_ = hoverHandle_ = -1;
+    dragBBoxHandle_ = hoverBBoxHandle_ = -1;
+    bboxDragOppositeImg_               = {};
     emit detectionSelected(selectedIndex_);
     update();
     return true;
@@ -276,17 +304,256 @@ bool ImageCanvas::setSelectedClass(const QString& cls) {
     update();
     return true;
 }
+
+bool ImageCanvas::selectDetectionInDirection(int key) {
+    if (dets_.isEmpty()) {
+        emit shortcutFeedback(tr("当前图片没有 Detector"));
+        return true;
+    }
+
+    const auto centerOf = [](const Armor& armor) {
+        return (armor.p0 + armor.p1 + armor.p2 + armor.p3) / 4.0;
+    };
+
+    // 尚未选中时，四个方向键都从最靠上的目标开始，同一高度取最靠左者。
+    if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size()) {
+        int topLeftIndex          = 0;
+        QPointF topLeft           = centerOf(dets_.front());
+        constexpr double epsilon = 0.001;
+        for (int index = 1; index < dets_.size(); ++index) {
+            const QPointF candidate = centerOf(dets_[index]);
+            if (candidate.y() < topLeft.y() - epsilon
+                || (std::abs(candidate.y() - topLeft.y()) <= epsilon
+                    && candidate.x() < topLeft.x())) {
+                topLeftIndex = index;
+                topLeft      = candidate;
+            }
+        }
+        setSelectedIndex(topLeftIndex);
+        emit shortcutFeedback(tr("已选中左上角 Detector"));
+        return true;
+    }
+
+    const QPointF origin = centerOf(dets_[selectedIndex_]);
+    int bestIndex        = -1;
+    double bestScore     = std::numeric_limits<double>::max();
+    for (int index = 0; index < dets_.size(); ++index) {
+        if (index == selectedIndex_)
+            continue;
+        const QPointF delta = centerOf(dets_[index]) - origin;
+        double primary       = 0.0;
+        double perpendicular = 0.0;
+        switch (key) {
+        case Qt::Key_W:
+            primary       = -delta.y();
+            perpendicular = std::abs(delta.x());
+            break;
+        case Qt::Key_A:
+            primary       = -delta.x();
+            perpendicular = std::abs(delta.y());
+            break;
+        case Qt::Key_S:
+            primary       = delta.y();
+            perpendicular = std::abs(delta.x());
+            break;
+        case Qt::Key_D:
+            primary       = delta.x();
+            perpendicular = std::abs(delta.y());
+            break;
+        default: return false;
+        }
+        if (primary <= 0.0)
+            continue;
+
+        // 欧氏距离保证选择附近目标，轻微惩罚横向偏移以优先同一行/列。
+        const double score = std::hypot(delta.x(), delta.y()) + perpendicular * 0.25;
+        if (score < bestScore) {
+            bestScore = score;
+            bestIndex = index;
+        }
+    }
+
+    if (bestIndex >= 0) {
+        setSelectedIndex(bestIndex);
+        emit shortcutFeedback(tr("已切换选中的 Detector"));
+    } else {
+        emit shortcutFeedback(tr("该方向没有其他 Detector"));
+    }
+    return true;
+}
+
+int ImageCanvas::visibilityPointForKey(int key) const {
+    // Armor 内部顺序：TL, BL, BR, TR；快捷键顺序：J, K, N, M。
+    switch (key) {
+    case Qt::Key_J: return 0; // 左上
+    case Qt::Key_K: return 3; // 右上
+    case Qt::Key_N: return 1; // 左下
+    case Qt::Key_M: return 2; // 右下
+    default: return -1;
+    }
+}
+
+void ImageCanvas::setKeypointVisibility(
+    int detectionIndex, int pointIndex, int visibility, const QString& action) {
+    if (detectionIndex < 0 || detectionIndex >= dets_.size() || pointIndex < 0 || pointIndex > 3)
+        return;
+
+    static const std::array<QString, 4> pointNames{
+        tr("左上角"), tr("左下角"), tr("右下角"), tr("右上角")};
+    Armor& armor                            = dets_[detectionIndex];
+    armor.keypointVisibility[pointIndex]    = visibility;
+    emit detectionUpdated(detectionIndex, armor);
+    emit shortcutFeedback(tr("%1已设置为%2").arg(pointNames[pointIndex], action));
+    update();
+}
+
+void ImageCanvas::commitPendingVisibilityToggle() {
+    if (!visibilityShortcutTimer_ || pendingVisibilityPointIndex_ < 0)
+        return;
+
+    visibilityShortcutTimer_->stop();
+    const int detectionIndex = pendingVisibilityDetectionIndex_;
+    const int pointIndex     = pendingVisibilityPointIndex_;
+    pendingVisibilityDetectionIndex_ = -1;
+    pendingVisibilityPointIndex_     = -1;
+    if (detectionIndex < 0 || detectionIndex >= dets_.size())
+        return;
+
+    const int current = dets_[detectionIndex].keypointVisibility[pointIndex];
+    const int next    = current == 2 ? 0 : 2;
+    setKeypointVisibility(
+        detectionIndex, pointIndex, next, next == 2 ? tr("可见") : tr("不可见"));
+}
+
+void ImageCanvas::cancelPendingVisibilityShortcut() {
+    if (visibilityShortcutTimer_)
+        visibilityShortcutTimer_->stop();
+    pendingVisibilityDetectionIndex_ = -1;
+    pendingVisibilityPointIndex_     = -1;
+}
+
+bool ImageCanvas::handleVisibilityShortcut(int pointIndex) {
+    if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size()) {
+        commitPendingVisibilityToggle();
+        emit shortcutFeedback(tr("请先用 WASD 选中一个 Detector"));
+        return true;
+    }
+
+    if (visibilityShortcutTimer_ && visibilityShortcutTimer_->isActive()
+        && pendingVisibilityDetectionIndex_ == selectedIndex_
+        && pendingVisibilityPointIndex_ == pointIndex) {
+        visibilityShortcutTimer_->stop();
+        const int detectionIndex = pendingVisibilityDetectionIndex_;
+        pendingVisibilityDetectionIndex_ = -1;
+        pendingVisibilityPointIndex_     = -1;
+        setKeypointVisibility(detectionIndex, pointIndex, 1, tr("不在范围内"));
+        return true;
+    }
+
+    // 按下了另一个可见性键时，先提交前一个键的单按操作。
+    commitPendingVisibilityToggle();
+    pendingVisibilityDetectionIndex_ = selectedIndex_;
+    pendingVisibilityPointIndex_     = pointIndex;
+    visibilityShortcutTimer_->start(QApplication::doubleClickInterval());
+    return true;
+}
+
+bool ImageCanvas::handleEditorShortcut(int key, Qt::KeyboardModifiers modifiers) {
+    const int visibilityPoint = visibilityPointForKey(key);
+    if (modifiers.testAnyFlags(Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {
+        commitPendingVisibilityToggle();
+        return false;
+    }
+
+    if (visibilityPoint >= 0)
+        return handleVisibilityShortcut(visibilityPoint);
+
+    // 任意其他按键都会结束上一可见性键的双按等待，并落实为单按。
+    commitPendingVisibilityToggle();
+
+    if (key == Qt::Key_W || key == Qt::Key_A || key == Qt::Key_S || key == Qt::Key_D)
+        return selectDetectionInDirection(key);
+
+    QString color;
+    QString colorName;
+    QString cls;
+    QString className;
+    switch (key) {
+    case Qt::Key_R:
+        color     = QStringLiteral("R");
+        colorName = QStringLiteral("Red");
+        break;
+    case Qt::Key_G:
+        color     = QStringLiteral("G");
+        colorName = QStringLiteral("Gray");
+        break;
+    case Qt::Key_B:
+        color     = QStringLiteral("B");
+        colorName = QStringLiteral("Blue");
+        break;
+    case Qt::Key_P:
+        color     = QStringLiteral("P");
+        colorName = QStringLiteral("Purple");
+        break;
+    case Qt::Key_1:
+    case Qt::Key_2:
+    case Qt::Key_3:
+    case Qt::Key_4:
+    case Qt::Key_5:
+        cls       = QString::number(key - Qt::Key_0);
+        className = cls;
+        break;
+    case Qt::Key_O:
+        cls = QStringLiteral("O");
+        className = QStringLiteral("Outpost");
+        break;
+    case Qt::Key_L:
+        cls = QStringLiteral("B");
+        className = QStringLiteral("Base");
+        break;
+    default: break;
+    }
+
+    const bool setBig = key == Qt::Key_Plus
+                     || (key == Qt::Key_Equal
+                         && modifiers.testFlag(Qt::ShiftModifier));
+    const bool setSmall = key == Qt::Key_Minus;
+    if (color.isEmpty() && cls.isEmpty() && !setBig && !setSmall)
+        return false;
+
+    if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size()) {
+        emit shortcutFeedback(tr("请先用 WASD 选中一个 Detector"));
+        return true;
+    }
+
+    Armor& selected = dets_[selectedIndex_];
+    QString feedback;
+    if (!color.isEmpty()) {
+        selected.color = color;
+        feedback       = tr("颜色已设置为 %1").arg(colorName);
+    } else if (!cls.isEmpty()) {
+        selected.cls = cls;
+        feedback     = tr("Class 已设置为 %1").arg(className);
+    } else {
+        selected.size = setBig ? 1 : 0;
+        updateBBoxFromCorners(selected);
+        feedback = setBig ? tr("大小已设置为 Big") : tr("大小已设置为 Small");
+    }
+    emit detectionUpdated(selectedIndex_, selected);
+    emit shortcutFeedback(feedback);
+    update();
+    return true;
+}
+
 bool ImageCanvas::setSelectedInfo(
-    const QString& cls, const QString& color, const int& size,
-    int vis0, int vis1, int vis2, int vis3) {
+    const QString& cls, const QString& color, const int& size, int vis0, int vis1, int vis2,
+    int vis3) {
     if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size())
         return false;
-    dets_[selectedIndex_].size  = size;
-    dets_[selectedIndex_].color = color.isEmpty() ? "Gray" : color;
-    dets_[selectedIndex_].cls   = cls.isEmpty() ? QStringLiteral("unknown") : cls;
+    dets_[selectedIndex_].size               = size;
+    dets_[selectedIndex_].color              = color.isEmpty() ? "Gray" : color;
+    dets_[selectedIndex_].cls                = cls.isEmpty() ? QStringLiteral("unknown") : cls;
     dets_[selectedIndex_].keypointVisibility = {vis0, vis1, vis2, vis3};
-    dets_[selectedIndex_].leftVisible = vis0 > 0 || vis1 > 0;
-    dets_[selectedIndex_].rightVisible = vis2 > 0 || vis3 > 0;
     // 尺寸变化会影响BBox计算（不同尺寸使用不同SVG锚点），重新计算
     updateBBoxFromCorners(dets_[selectedIndex_]);
     emit detectionUpdated(selectedIndex_, dets_[selectedIndex_]);
@@ -302,16 +569,13 @@ void ImageCanvas::updateBBoxFromCorners(Armor& a) const {
     const double H = double(img_.height());
 
     // SVG固有尺寸和锚点 - 使用集中管理的常量
-    const auto& svgTemplate = (a.size == 0)
-        ? labelmaster::util::SvgConstants::smallArmor()
-        : labelmaster::util::SvgConstants::bigArmor();
+    const auto& svgTemplate = (a.size == 0) ? labelmaster::util::SvgConstants::smallArmor()
+                                            : labelmaster::util::SvgConstants::bigArmor();
 
     // SVG外框四个角 (TL, BL, BR, TR)
     QPolygonF svg_quad;
-    svg_quad << QPointF(0., 0.)
-             << QPointF(0., svgTemplate.height)
-             << QPointF(svgTemplate.width, svgTemplate.height)
-             << QPointF(svgTemplate.width, 0.);
+    svg_quad << QPointF(0., 0.) << QPointF(0., svgTemplate.height)
+             << QPointF(svgTemplate.width, svgTemplate.height) << QPointF(svgTemplate.width, 0.);
 
     // 图像中的四个锚点 (像素坐标)
     QPolygonF img_anchors;
@@ -358,6 +622,28 @@ void ImageCanvas::updateBBoxFromCorners(Armor& a) const {
     }
 }
 
+bool ImageCanvas::bboxEditingSupported() const {
+    const int configured = controller::AppSettings::instance().outputFormat();
+    if (configured < static_cast<int>(LabelOutputFormat::Points11)
+        || configured > static_cast<int>(LabelOutputFormat::LabelMasterV6)) {
+        return false;
+    }
+    return supportsBoundingBox(static_cast<LabelOutputFormat>(configured));
+}
+
+std::array<QPointF, 4> ImageCanvas::bboxCornersInImage(const Armor& armor) const {
+    const double cx    = armor.norm_x * img_.width();
+    const double cy    = armor.norm_y * img_.height();
+    const double halfW = armor.norm_w * img_.width() / 2.0;
+    const double halfH = armor.norm_h * img_.height() / 2.0;
+    return {
+        QPointF(cx - halfW, cy - halfH),
+        QPointF(cx - halfW, cy + halfH),
+        QPointF(cx + halfW, cy + halfH),
+        QPointF(cx + halfW, cy - halfH),
+    };
+}
+
 /* ===== 导入/导出 ===== */
 
 /* ===== 绘制 ===== */
@@ -370,12 +656,12 @@ void ImageCanvas::paintEvent(QPaintEvent*) {
     const QRectF R = imageRectOnWidget();
     p.setRenderHint(QPainter::SmoothPixmapTransform, true);
     p.drawImage(R, img_);
-    drawMasks(maskRects_, p);             // <<< 新增：绘制Mask
+    drawMasks(maskRects_, p); // <<< 新增：绘制Mask
     drawDetections(p);
     drawRoi(p);
     drawSvg(p, dets_);
-    drawDragRect(p);                      // <<< 新增：拖框时的虚线矩形
-    drawCrosshair(p);                     // 十字准心
+    drawDragRect(p);          // <<< 新增：拖框时的虚线矩形
+    drawCrosshair(p);         // 十字准心
 }
 
 void ImageCanvas::drawDragRect(QPainter& p) const {
@@ -432,10 +718,10 @@ void ImageCanvas::drawDetections(QPainter& p) const {
     };
 
     // 除纯角点旧格式外，显示保存于标签中的 bbox。
-    const int outputFormat = controller::AppSettings::instance().outputFormat();
+    const int outputFormat     = controller::AppSettings::instance().outputFormat();
     const bool showRectOverlay = outputFormat != static_cast<int>(LabelOutputFormat::Points11);
-    const double W = img_.width();
-    const double H = img_.height();
+    const double W             = img_.width();
+    const double H             = img_.height();
 
     for (int i = 0; i < dets_.size(); ++i) {
         const auto& d = dets_[i];
@@ -458,18 +744,17 @@ void ImageCanvas::drawDetections(QPainter& p) const {
                 double cy = d.norm_y * H;
                 double w  = d.norm_w * W;
                 double h  = d.norm_h * H;
-                rectImg = QRectF(cx - w/2, cy - h/2, w, h);
+                rectImg   = QRectF(cx - w / 2, cy - h / 2, w, h);
             } else {
                 // 没有存储的 bbox，动态计算SVG透视变换后的真实边界框
                 // SVG固有尺寸和锚点 - 使用集中管理的常量
                 const auto& svgTemplate = (d.size == 0)
-                    ? labelmaster::util::SvgConstants::smallArmor()
-                    : labelmaster::util::SvgConstants::bigArmor();
+                                            ? labelmaster::util::SvgConstants::smallArmor()
+                                            : labelmaster::util::SvgConstants::bigArmor();
 
                 // SVG外框四个角 (TL, BL, BR, TR)
                 QPolygonF svg_quad;
-                svg_quad << QPointF(0., 0.)
-                         << QPointF(0., svgTemplate.height)
+                svg_quad << QPointF(0., 0.) << QPointF(0., svgTemplate.height)
                          << QPointF(svgTemplate.width, svgTemplate.height)
                          << QPointF(svgTemplate.width, 0.);
 
@@ -501,15 +786,25 @@ void ImageCanvas::drawDetections(QPainter& p) const {
 
             // 转换为Widget坐标并绘制
             if (!rectImg.isEmpty()) {
-                QRectF rectW = QRectF(
-                    imageToWidget(rectImg.topLeft()),
-                    imageToWidget(rectImg.bottomRight())
-                ).normalized();
+                QRectF rectW =
+                    QRectF(imageToWidget(rectImg.topLeft()), imageToWidget(rectImg.bottomRight()))
+                        .normalized();
 
                 QPen rectPen(base.lighter(150), 1, Qt::DashLine);
                 p.setPen(rectPen);
                 p.setBrush(Qt::NoBrush);
                 p.drawRect(rectW);
+
+                if (isSel && bboxEditingSupported()) {
+                    const auto corners = bboxCornersInImage(d);
+                    for (int k = 0; k < int(corners.size()); ++k) {
+                        const QPointF w = imageToWidget(corners[k]);
+                        const bool hot  = k == hoverBBoxHandle_ || k == dragBBoxHandle_;
+                        p.setPen(QPen(hot ? Qt::yellow : base.lighter(150), 1));
+                        p.setBrush(hot ? Qt::yellow : base.darker(115));
+                        p.drawRect(QRectF(w.x() - 5, w.y() - 5, 10, 10));
+                    }
+                }
             }
         }
 
@@ -532,9 +827,8 @@ void ImageCanvas::drawDetections(QPainter& p) const {
 
         // 文本（描边 + 主色）- 添加 [R+P] 标记表示使用矩形+角点格式
         const QPointF tl   = poly.boundingRect().topLeft();
-        const QString text = showRectOverlay
-            ? QString("%1%2 [R+P]").arg(d.color).arg(d.cls)
-            : QString("%1%2").arg(d.color).arg(d.cls);
+        const QString text = showRectOverlay ? QString("%1%2 [R+P]").arg(d.color).arg(d.cls)
+                                             : QString("%1%2").arg(d.color).arg(d.cls);
         QFont f            = p.font();
         f.setPointSizeF(f.pointSizeF() + 1);
         p.setFont(f);
@@ -545,7 +839,6 @@ void ImageCanvas::drawDetections(QPainter& p) const {
 
         // 选中时角点
         if (isSel) {
-            p.setPen(Qt::NoPen);
             for (int k = 0; k < 4; ++k) {
                 const QPointF w = imageToWidget(
                     k == 0   ? d.p0
@@ -554,7 +847,13 @@ void ImageCanvas::drawDetections(QPainter& p) const {
                              : d.p3);
                 const bool hot = (k == hoverHandle_ || k == dragHandle_);
                 QColor c       = hot ? base.lighter(120) : base;
-                p.setBrush(c);
+                if (d.keypointVisibility[k] != 2) {
+                    p.setPen(QPen(c, 2));
+                    p.setBrush(Qt::NoBrush);
+                } else {
+                    p.setPen(Qt::NoPen);
+                    p.setBrush(c);
+                }
                 p.drawEllipse(w, kHandleRadius_, kHandleRadius_);
             }
         }
@@ -592,16 +891,13 @@ void ImageCanvas::drawRoi(QPainter& p) const {
 void ImageCanvas::drawCrosshair(QPainter& p) const {
     if (!mouseInside_ || img_.isNull())
         return;
-    const QRectF R = imageRectOnWidget();
-    if (!R.contains(mousePosW_))
-        return;
 
     p.save();
     p.setRenderHint(QPainter::Antialiasing, false);
-    p.setClipRect(R);
+    p.setClipRect(rect());
     p.setPen(QPen(QColor(0, 255, 0, 180), 1));
-    p.drawLine(QPoint(mousePosW_.x(), int(R.top())), QPoint(mousePosW_.x(), int(R.bottom())));
-    p.drawLine(QPoint(int(R.left()), mousePosW_.y()), QPoint(int(R.right()), mousePosW_.y()));
+    p.drawLine(QPoint(mousePosW_.x(), rect().top()), QPoint(mousePosW_.x(), rect().bottom()));
+    p.drawLine(QPoint(rect().left(), mousePosW_.y()), QPoint(rect().right(), mousePosW_.y()));
     p.restore();
 }
 // 直方图均衡化
@@ -690,6 +986,14 @@ void ImageCanvas::mousePressEvent(QMouseEvent* e) {
             isMaskMode = false;
             // 1) 若有选中，优先检测角点拖动
             if (selectedIndex_ >= 0 && selectedIndex_ < dets_.size()) {
+                hoverBBoxHandle_ = hitBBoxHandleOnSelected(e->pos());
+                if (hoverBBoxHandle_ >= 0) {
+                    dragBBoxHandle_      = hoverBBoxHandle_;
+                    const auto corners   = bboxCornersInImage(dets_[selectedIndex_]);
+                    bboxDragOppositeImg_ = corners[(dragBBoxHandle_ + 2) % 4];
+                    update();
+                    return;
+                }
                 hoverHandle_ = hitHandleOnSelected(e->pos());
                 if (hoverHandle_ >= 0) {
                     dragHandle_ = hoverHandle_;
@@ -703,6 +1007,9 @@ void ImageCanvas::mousePressEvent(QMouseEvent* e) {
             if (hit >= 0) {
                 if (selectedIndex_ != hit) {
                     selectedIndex_ = hit;
+                    dragHandle_ = hoverHandle_ = -1;
+                    dragBBoxHandle_ = hoverBBoxHandle_ = -1;
+                    bboxDragOppositeImg_               = {};
                     emit detectionSelected(selectedIndex_);
                 }
                 update();
@@ -733,9 +1040,12 @@ void ImageCanvas::mousePressEvent(QMouseEvent* e) {
             return;
         }
         // 未命中：啥也不做（但确保没有遗留拖拽状态）
-        draggingRect_ = false;
-        dragHandle_   = -1;
-        hoverHandle_  = -1;
+        draggingRect_        = false;
+        dragHandle_          = -1;
+        hoverHandle_         = -1;
+        dragBBoxHandle_      = -1;
+        hoverBBoxHandle_     = -1;
+        bboxDragOppositeImg_ = {};
         update();
         return;
     }
@@ -743,17 +1053,15 @@ void ImageCanvas::mousePressEvent(QMouseEvent* e) {
 void ImageCanvas::createNewDetection() { // 画框
     const QRect r = dragRectImg_.normalized();
     Armor a;
-    a.p0          = QPointF(r.left(), r.top());
-    a.p1          = QPointF(r.left(), r.bottom());
-    a.p2          = QPointF(r.right(), r.bottom());
-    a.p3          = QPointF(r.right(), r.top());
-    a.cls         = currentClass_.isEmpty() ? QStringLiteral("unknown") : currentClass_;
-    a.color       = currentColor_.isEmpty() ? QStringLiteral("G") : currentColor_;
-    a.size        = currentSize_;
+    a.p0                 = QPointF(r.left(), r.top());
+    a.p1                 = QPointF(r.left(), r.bottom());
+    a.p2                 = QPointF(r.right(), r.bottom());
+    a.p3                 = QPointF(r.right(), r.top());
+    a.cls                = currentClass_.isEmpty() ? QStringLiteral("unknown") : currentClass_;
+    a.color              = currentColor_.isEmpty() ? QStringLiteral("G") : currentColor_;
+    a.size               = currentSize_;
     a.keypointVisibility = currentKeypointVisibility_;
-    a.leftVisible = a.keypointVisibility[0] > 0 || a.keypointVisibility[1] > 0;
-    a.rightVisible = a.keypointVisibility[2] > 0 || a.keypointVisibility[3] > 0;
-    currentColor_ = "";
+    currentColor_        = "";
     // 自动计算归一化BBox
     updateBBoxFromCorners(a);
     dets_.append(a);
@@ -783,6 +1091,15 @@ void ImageCanvas::mouseReleaseEvent(QMouseEvent* e) {
                     // TL, BL, BR, TR  (CCW)
                 }
             }
+            return;
+        }
+
+        if (dragBBoxHandle_ >= 0) {
+            dragBBoxHandle_      = -1;
+            bboxDragOppositeImg_ = {};
+            if (selectedIndex_ >= 0 && selectedIndex_ < dets_.size())
+                emit detectionUpdated(selectedIndex_, dets_[selectedIndex_]);
+            update();
             return;
         }
 
@@ -819,6 +1136,43 @@ void ImageCanvas::mouseMoveEvent(QMouseEvent* e) {
         QPoint a     = widgetToImage(dragRectStartW_).toPoint();
         QPoint b     = widgetToImage(e->pos()).toPoint();
         dragRectImg_ = QRect(a, b).normalized();
+        update();
+        return;
+    }
+    // 拖动 bbox 方角柄；关键点保持不变。
+    if (dragBBoxHandle_ >= 0 && selectedIndex_ >= 0 && selectedIndex_ < dets_.size()) {
+        Armor& armor           = dets_[selectedIndex_];
+        const QPointF opposite = bboxDragOppositeImg_;
+        QPointF current        = widgetToImage(e->pos());
+        switch (dragBBoxHandle_) {
+        case 0:
+            current.setX(std::min(current.x(), opposite.x() - 2.0));
+            current.setY(std::min(current.y(), opposite.y() - 2.0));
+            break;
+        case 1:
+            current.setX(std::min(current.x(), opposite.x() - 2.0));
+            current.setY(std::max(current.y(), opposite.y() + 2.0));
+            break;
+        case 2:
+            current.setX(std::max(current.x(), opposite.x() + 2.0));
+            current.setY(std::max(current.y(), opposite.y() + 2.0));
+            break;
+        case 3:
+            current.setX(std::max(current.x(), opposite.x() + 2.0));
+            current.setY(std::min(current.y(), opposite.y() - 2.0));
+            break;
+        }
+        const double minX   = std::min(opposite.x(), current.x());
+        const double minY   = std::min(opposite.y(), current.y());
+        const double maxX   = std::max(opposite.x(), current.x());
+        const double maxY   = std::max(opposite.y(), current.y());
+        const double width  = maxX - minX;
+        const double height = maxY - minY;
+        armor.norm_x        = (minX + maxX) / (2.0 * img_.width());
+        armor.norm_y        = (minY + maxY) / (2.0 * img_.height());
+        armor.norm_w        = width / img_.width();
+        armor.norm_h        = height / img_.height();
+        emit detectionUpdated(selectedIndex_, armor);
         update();
         return;
     }
@@ -863,7 +1217,7 @@ void ImageCanvas::mouseMoveEvent(QMouseEvent* e) {
                 }
                 break;
             }
-            case 1: {         // p1：左下 —— 和右边 p3->p2 平行
+            case 1: { // p1：左下 —— 和右边 p3->p2 平行
                 const QPointF t = A.p3 - A.p2;
                 if (qFuzzyIsNull(t.y())) {
                     tx = pi.x();
@@ -872,7 +1226,7 @@ void ImageCanvas::mouseMoveEvent(QMouseEvent* e) {
                 }
                 break;
             }
-            case 2: {         // p2：右下 —— 和左边 p0->p1 平行
+            case 2: { // p2：右下 —— 和左边 p0->p1 平行
                 const QPointF t = A.p0 - A.p1;
                 if (qFuzzyIsNull(t.y())) {
                     tx = pi.x();
@@ -881,7 +1235,7 @@ void ImageCanvas::mouseMoveEvent(QMouseEvent* e) {
                 }
                 break;
             }
-            case 3: {         // p3：右上 —— 和左边 p0->p1 平行
+            case 3: { // p3：右上 —— 和左边 p0->p1 平行
                 const QPointF t = A.p0 - A.p1;
                 if (qFuzzyIsNull(t.y())) {
                     tx = pi.x();
@@ -917,9 +1271,11 @@ void ImageCanvas::mouseMoveEvent(QMouseEvent* e) {
 
     // 仅选中时更新悬停角点
     if (selectedIndex_ >= 0 && selectedIndex_ < dets_.size()) {
-        hoverHandle_ = hitHandleOnSelected(e->pos());
+        hoverBBoxHandle_ = hitBBoxHandleOnSelected(e->pos());
+        hoverHandle_     = hoverBBoxHandle_ >= 0 ? -1 : hitHandleOnSelected(e->pos());
     } else {
-        hoverHandle_ = -1;
+        hoverHandle_     = -1;
+        hoverBBoxHandle_ = -1;
     }
 
     // 悬停命中（最后）
@@ -954,11 +1310,19 @@ void ImageCanvas::keyPressEvent(QKeyEvent* e) {
         return;
     }
 
+    if (handleEditorShortcut(e->key(), e->modifiers())) {
+        e->accept();
+        return;
+    }
+
     if (e->key() == Qt::Key_Escape) {
         // 取消任何进行中的微操作
-        draggingRect_ = false;
-        dragHandle_   = -1;
-        hoverHandle_  = -1;
+        draggingRect_        = false;
+        dragHandle_          = -1;
+        hoverHandle_         = -1;
+        dragBBoxHandle_      = -1;
+        hoverBBoxHandle_     = -1;
+        bboxDragOppositeImg_ = {};
         update();
         e->accept();
         return;
@@ -1030,6 +1394,20 @@ QRect ImageCanvas::clampRectToImage(const QRect& r) const {
 }
 
 // 仅在“选中目标”上测试角点命中
+int ImageCanvas::hitBBoxHandleOnSelected(const QPoint& wpos) const {
+    if (!bboxEditingSupported() || selectedIndex_ < 0 || selectedIndex_ >= dets_.size())
+        return -1;
+    const Armor& armor = dets_[selectedIndex_];
+    if (armor.norm_w < 0 || armor.norm_h < 0)
+        return -1;
+    const auto corners = bboxCornersInImage(armor);
+    for (int i = 0; i < int(corners.size()); ++i) {
+        if (QLineF(imageToWidget(corners[i]), wpos).length() <= kHandleRadius_ * 1.8)
+            return i;
+    }
+    return -1;
+}
+
 int ImageCanvas::hitHandleOnSelected(const QPoint& wpos) const {
     if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size())
         return -1;
@@ -1119,15 +1497,13 @@ void ImageCanvas::promptEditSelectedInfo(bool isCurrent) {
     //     setSelectedClass(cls.trimmed());
     ui::InfoDialog* dialog = new ui::InfoDialog(this);
     connect(dialog, &ui::InfoDialog::InfoGetted, this, &ImageCanvas::ProcessInfoChanged);
-    const bool visibilitySupported =
-        controller::AppSettings::instance().outputFormat()
-        == static_cast<int>(LabelOutputFormat::LabelMasterV6);
-    const bool pose14Classes = controller::AppSettings::instance().v6ClassScheme() == 14;
+    const bool visibilitySupported = controller::AppSettings::instance().outputFormat()
+                                  == static_cast<int>(LabelOutputFormat::LabelMasterV6);
     if (isCurrent) {
         dialog->updateInfo(
-            true, 0, 0, 0, visibilitySupported,
-            currentKeypointVisibility_[0], currentKeypointVisibility_[1],
-            currentKeypointVisibility_[2], currentKeypointVisibility_[3], pose14Classes);
+            true, 0, 0, 0, visibilitySupported, currentKeypointVisibility_[0],
+            currentKeypointVisibility_[1], currentKeypointVisibility_[2],
+            currentKeypointVisibility_[3]);
     } else {
         dialog->updateInfo(
             false, IdConvert::classToken2Id(dets_[selectedIndex_].cls),
@@ -1135,17 +1511,17 @@ void ImageCanvas::promptEditSelectedInfo(bool isCurrent) {
             visibilitySupported, dets_[selectedIndex_].keypointVisibility[0],
             dets_[selectedIndex_].keypointVisibility[1],
             dets_[selectedIndex_].keypointVisibility[2],
-            dets_[selectedIndex_].keypointVisibility[3], pose14Classes);
+            dets_[selectedIndex_].keypointVisibility[3]);
     }
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->show();
 }
 
 void ImageCanvas::setupSvg() {
-    auto icons_dir  = controller::AppSettings::instance().assetsDir() + "/icons";
+    auto icons_dir = controller::AppSettings::instance().assetsDir() + "/icons";
     // G (哨兵) - class_id = 0, 通过 size 区分大小
-    svgCache_[0][0] = new QSvgRenderer(icons_dir + "/Gs.svg", this);  // 小装甲
-    svgCache_[0][1] = new QSvgRenderer(icons_dir + "/Gb.svg", this);  // 大装甲
+    svgCache_[0][0] = new QSvgRenderer(icons_dir + "/Gs.svg", this); // 小装甲
+    svgCache_[0][1] = new QSvgRenderer(icons_dir + "/Gb.svg", this); // 大装甲
     // 1 (一号大装甲) - class_id = 1
     svgCache_[1][0] = new QSvgRenderer(icons_dir + "/1.svg", this);
     svgCache_[1][1] = svgCache_[1][0];
@@ -1275,17 +1651,18 @@ void ImageCanvas::drawSvg(QPainter& p, const QVector<Armor>& armors) const {
 
 void ImageCanvas::requestSave() {
     // qDebug() << "requestSave called"; // 处理图片,绘制Mask
+    commitPendingVisibilityToggle();
     QPainter p(&raw_img);
     drawMasks(maskRects_, p, false);
     emit annotationsPublished(dets_, raw_img, !maskRects_.isEmpty());
 }
 void ImageCanvas::ProcessInfoChanged(
-    const QString& EditedClass, const QString& Color, const int& size,
-    int vis0, int vis1, int vis2, int vis3, bool isCurrent) {
+    const QString& EditedClass, const QString& Color, const int& size, int vis0, int vis1, int vis2,
+    int vis3, bool isCurrent) {
     if (isCurrent) {
-        currentClass_ = EditedClass;
-        currentColor_ = Color;
-        currentSize_  = size;
+        currentClass_              = EditedClass;
+        currentColor_              = Color;
+        currentSize_               = size;
         currentKeypointVisibility_ = {vis0, vis1, vis2, vis3};
         createNewDetection();
     } else {

@@ -98,7 +98,7 @@ bool parsePoints(
     for (int i = 0; i < 4; ++i) {
         const double x = values[i * 2] * width;
         const double y = values[i * 2 + 1] * height;
-        points[i] = QPointF(x, y);
+        points[i]      = QPointF(x, y);
     }
     return true;
 }
@@ -123,68 +123,17 @@ int classIdFromToken(const QString& token) {
     return -1;
 }
 
-bool decodePoseClass(int poseClass, PoseClassScheme scheme, Armor& armor, QString& error) {
-    int colorId = -1;
-    int classId = -1;
-    int size    = 0;
-    if (scheme == PoseClassScheme::Classes36) {
-        if (poseClass < 0 || poseClass >= 36) {
-            error = QString("无效的 V6 36 类 class_id: %1").arg(poseClass);
-            return false;
-        }
-        colorId       = poseClass / 9;
-        const int tag = poseClass % 9;
-        classId       = tag <= 6 ? tag : 7;
-        size          = tag == 1 || tag == 8 ? 1 : 0;
-    } else {
-        static constexpr std::array<int, 7> classes{2, 3, 4, 5, 7, 0, 6};
-        if (poseClass < 0 || poseClass >= 14) {
-            error = QString("无效的 V6 14 类 class_id: %1").arg(poseClass);
-            return false;
-        }
-        colorId = poseClass < 7 ? 0 : 1;
-        classId = classes[poseClass % 7];
-        size    = 0;
+bool decodeV5Class(int poseClass, Armor& armor, QString& error) {
+    static constexpr std::array<int, 7> classes{2, 3, 4, 5, 7, 0, 6};
+    if (poseClass < 0 || poseClass >= 14) {
+        error = QString("无效的 V5 14 类 class_id: %1").arg(poseClass);
+        return false;
     }
+    const int colorId = poseClass < 7 ? 0 : 1;
+    const int classId = classes[poseClass % 7];
     armor.color = IdConvert::colorId2Letter(colorId);
     armor.cls   = IdConvert::idCollect2Token(classId);
-    armor.size  = size;
-    return true;
-}
-
-bool encodePoseClass(const Armor& armor, PoseClassScheme scheme, int& poseClass, QString& error) {
-    const int colorId = IdConvert::colorLetter2Id(armor.color);
-    const int classId = classIdFromToken(armor.cls);
-    if (!validColor(colorId) || !validClass(classId)) {
-        error = "V6 标注的颜色或类别无效";
-        return false;
-    }
-    if (scheme == PoseClassScheme::Classes36) {
-        const int tag = classId == 7 ? (armor.size == 1 ? 8 : 7) : classId;
-        poseClass     = colorId * 9 + tag;
-        return true;
-    }
-
-    if (colorId > 1 || classId == 1) {
-        error = "当前颜色/类别不存在于 V6 14 类体系";
-        return false;
-    }
-    int suffix = -1;
-    switch (classId) {
-    case 2: suffix = 0; break;
-    case 3: suffix = 1; break;
-    case 4: suffix = 2; break;
-    case 5: suffix = 3; break;
-    case 7: suffix = 4; break;
-    case 0: suffix = 5; break;
-    case 6: suffix = 6; break;
-    default: break;
-    }
-    if (suffix < 0) {
-        error = "当前类别不存在于 V6 14 类体系";
-        return false;
-    }
-    poseClass = colorId * 7 + suffix;
+    armor.size  = 0;
     return true;
 }
 
@@ -202,19 +151,18 @@ bool parsePoseVisibility(const QString& text, int& value, QString& error) {
 }
 
 bool decodeV4Class(int v4Class, Armor& armor, QString& error) {
-    if (v4Class < 0 || v4Class >= 64) {
-        error = QString("无效的 V4 class_id: %1").arg(v4Class);
+    if (v4Class < 0 || v4Class >= 36) {
+        error = QString("无效的 V4 36 类 class_id: %1").arg(v4Class);
         return false;
     }
 
-    const int colorId = v4Class / 16;
-    const int sizeId  = (v4Class % 16) / 8;
-    const int classId = v4Class % 8;
+    const int colorId = v4Class / 9;
+    const int tag     = v4Class % 9;
+    const int sizeId  = tag == 1 || tag == 8 ? 1 : 0;
+    const int classId = tag <= 6 ? tag : 7;
     if (!validColor(colorId) || !validSize(sizeId) || !validClass(classId)) {
-        error = QString("无效的 V4 color/size/class: %1 %2 %3")
-                    .arg(colorId)
-                    .arg(sizeId)
-                    .arg(classId);
+        error =
+            QString("无效的 V4 color/size/class: %1 %2 %3").arg(colorId).arg(sizeId).arg(classId);
         return false;
     }
 
@@ -224,8 +172,52 @@ bool decodeV4Class(int v4Class, Armor& armor, QString& error) {
     return true;
 }
 
-int encodeV4Class(int colorId, int sizeId, int classId) {
-    return colorId * 16 + sizeId * 8 + classId;
+bool encodeV4Class(
+    int colorId, int sizeId, int classId, int& encoded, QString& error) {
+    int tag = classId;
+    if (classId == 1) {
+        if (sizeId != 1) {
+            error = "V4 36 类体系中的 1 号必须是大装甲";
+            return false;
+        }
+    } else if (classId == 7) {
+        tag = sizeId == 1 ? 8 : 7;
+    } else if (sizeId != 0) {
+        error = "该类别在 V4 36 类体系中不存在大装甲编码";
+        return false;
+    }
+    encoded = colorId * 9 + tag;
+    return true;
+}
+
+bool decodeUnionSecretClass(int combined, Armor& armor, QString& error) {
+    if (combined < 0 || combined >= 39) {
+        error = QString("无效的 UnionSecret class_id: %1（允许范围 0～38）").arg(combined);
+        return false;
+    }
+
+    const int colorId = combined / 13;
+    const int tag     = combined % 13;
+    int sizeId        = 0;
+    int classId       = tag;
+    if (tag >= 8) {
+        sizeId = 1;
+        if (tag == 8)
+            classId = 7; // Big Base
+        else if (tag == 9)
+            classId = 0; // Big G
+        else
+            classId = tag - 7; // Big 3/4/5
+    }
+
+    if (!validColor(colorId) || !validSize(sizeId) || !validClass(classId)) {
+        error = QString("无法解码 UnionSecret class_id: %1").arg(combined);
+        return false;
+    }
+    armor.color = IdConvert::colorId2Letter(colorId);
+    armor.size  = sizeId;
+    armor.cls   = IdConvert::idCollect2Token(classId);
+    return true;
 }
 
 bool parseLegacyClass(
@@ -251,24 +243,58 @@ bool parseLegacyClass(
 }
 
 bool parseLine(
-    const QStringList& fields, const QSize& imageSize, DataSet format, PoseClassScheme poseScheme,
-    Armor& armor, QString& error) {
+    const QStringList& fields, const QSize& imageSize, DataSet format, Armor& armor,
+    QString& error) {
     armor = Armor{};
     std::array<QPointF, 4> points{};
     bool normalized = true;
 
     switch (format) {
-    case DataSet::LabelMasterV6: {
+    case DataSet::LabelMasterV5: {
         if (!requireFieldCount(fields, 17, error))
             return false;
         int poseClass = 0;
-        if (!parseInt(fields[0], "V6 class_id", poseClass, error)
-            || !decodePoseClass(poseClass, poseScheme, armor, error)) {
+        if (!parseInt(fields[0], "V5 class_id", poseClass, error)
+            || !decodeV5Class(poseClass, armor, error)) {
             return false;
         }
         std::array<double, 4> bbox{};
         for (int i = 0; i < 4; ++i) {
-            if (!parseDouble(fields[1 + i], "V6 bbox", bbox[i], error)) {
+            if (!parseDouble(fields[1 + i], "V5 bbox", bbox[i], error)) {
+                return false;
+            }
+        }
+        if (bbox[2] < 0.0 || bbox[3] < 0.0) {
+            error = "V5 bbox 的宽高不能为负数";
+            return false;
+        }
+        armor.norm_x = bbox[0];
+        armor.norm_y = bbox[1];
+        armor.norm_w = bbox[2];
+        armor.norm_h = bbox[3];
+        for (int i = 0; i < 4; ++i) {
+            double x        = 0.0;
+            double y        = 0.0;
+            const int start = 5 + i * 3;
+            if (!parseDouble(fields[start], "V5 关键点 x", x, error)
+                || !parseDouble(fields[start + 1], "V5 关键点 y", y, error)
+                || !parsePoseVisibility(fields[start + 2], armor.keypointVisibility[i], error)) {
+                return false;
+            }
+            points[i] = QPointF(x * imageSize.width(), y * imageSize.height());
+        }
+        assignPoints(armor, points);
+        return true;
+    }
+    case DataSet::LabelMasterV6: {
+        if (!requireFieldCount(fields, 19, error))
+            return false;
+        int color = 0, size = 0, cls = 0;
+        if (!parseNativeIdentity(fields, color, size, cls, error))
+            return false;
+        std::array<double, 4> bbox{};
+        for (int i = 0; i < 4; ++i) {
+            if (!parseDouble(fields[3 + i], "V6 bbox", bbox[i], error)) {
                 return false;
             }
         }
@@ -283,7 +309,7 @@ bool parseLine(
         for (int i = 0; i < 4; ++i) {
             double x        = 0.0;
             double y        = 0.0;
-            const int start = 5 + i * 3;
+            const int start = 7 + i * 3;
             if (!parseDouble(fields[start], "V6 关键点 x", x, error)
                 || !parseDouble(fields[start + 1], "V6 关键点 y", y, error)
                 || !parsePoseVisibility(fields[start + 2], armor.keypointVisibility[i], error)) {
@@ -291,63 +317,9 @@ bool parseLine(
             }
             points[i] = QPointF(x * imageSize.width(), y * imageSize.height());
         }
-        armor.leftVisible  = armor.keypointVisibility[0] > 0 || armor.keypointVisibility[1] > 0;
-        armor.rightVisible = armor.keypointVisibility[2] > 0 || armor.keypointVisibility[3] > 0;
-        assignPoints(armor, points);
-        return true;
-    }
-    case DataSet::LabelMasterV5: {
-        if (!requireFieldCount(fields, 15, error))
-            return false;
-        int color = 0, size = 0, cls = 0;
-        if (!parseNativeIdentity(fields, color, size, cls, error))
-            return false;
-        std::array<double, 10> coordinates{};
-        const std::array<int, 10> indices{3, 4, 5, 6, 7, 8, 10, 11, 12, 13};
-        for (int i = 0; i < int(indices.size()); ++i) {
-            if (!parseDouble(fields[indices[i]], "V5 坐标", coordinates[i], error)) {
-                return false;
-            }
-        }
-        int leftVisible = 0, rightVisible = 0;
-        if (!parseInt(fields[9], "左灯条可见性", leftVisible, error)
-            || !parseInt(fields[14], "右灯条可见性", rightVisible, error)
-            || (leftVisible != 0 && leftVisible != 1) || (rightVisible != 0 && rightVisible != 1)) {
-            if (error.isEmpty())
-                error = "灯条可见性只能是 0 或 1";
-            return false;
-        }
-        if (!leftVisible && !rightVisible) {
-            error = "左右灯条不能同时不可见";
-            return false;
-        }
-        const double centerX = coordinates[0];
-        const double centerY = coordinates[1];
-        points               = {
-            QPointF(coordinates[2] * imageSize.width(), coordinates[3] * imageSize.height()),
-            QPointF(coordinates[4] * imageSize.width(), coordinates[5] * imageSize.height()),
-            QPointF(coordinates[8] * imageSize.width(), coordinates[9] * imageSize.height()),
-            QPointF(coordinates[6] * imageSize.width(), coordinates[7] * imageSize.height()),
-        };
-        const double computedX =
-            (coordinates[2] + coordinates[4] + coordinates[6] + coordinates[8]) / 4.0;
-        const double computedY =
-            (coordinates[3] + coordinates[5] + coordinates[7] + coordinates[9]) / 4.0;
-        if (std::abs(centerX - computedX) > 0.00001 || std::abs(centerY - computedY) > 0.00001) {
-            error = "V5 中心点与四个灯条端点的均值不一致";
-            return false;
-        }
-        armor.color              = IdConvert::colorId2Letter(color);
-        armor.size               = size;
-        armor.cls                = IdConvert::idCollect2Token(cls);
-        armor.leftVisible        = leftVisible;
-        armor.rightVisible       = rightVisible;
-        armor.keypointVisibility = {
-            leftVisible ? 2 : 0,
-            leftVisible ? 2 : 0,
-            rightVisible ? 2 : 0,
-            rightVisible ? 2 : 0,
-        };
+        armor.color = IdConvert::colorId2Letter(color);
+        armor.size  = size;
+        armor.cls   = IdConvert::idCollect2Token(cls);
         assignPoints(armor, points);
         return true;
     }
@@ -474,6 +446,18 @@ bool parseLine(
         assignPoints(armor, points);
         return true;
     }
+    case DataSet::UnionSecret: {
+        if (!requireFieldCount(fields, 9, error))
+            return false;
+        int combined = 0;
+        if (!parseInt(fields[0], "UnionSecret class_id", combined, error)
+            || !decodeUnionSecretClass(combined, armor, error)
+            || !parsePoints(fields, 1, imageSize, points, normalized, error)) {
+            return false;
+        }
+        assignPoints(armor, points);
+        return true;
+    }
     case DataSet::Auto: error = "读取标签时必须指定输入格式"; return false;
     }
     error = "未知输入格式";
@@ -545,7 +529,7 @@ bool labelHasDataLines(const QString& path, bool& hasData, QString& error) {
     stream.setCodec("UTF-8");
 #endif
     while (!stream.atEnd()) {
-        QString line = stream.readLine();
+        QString line      = stream.readLine();
         const int comment = line.indexOf('#');
         if (comment >= 0)
             line = line.left(comment);
@@ -564,7 +548,7 @@ QString outputFormatName(LabelOutputFormat format) {
     case LabelOutputFormat::Points11: return "Points Only (11 fields)";
     case LabelOutputFormat::RectPoints15: return "Rect + Points (15 fields)";
     case LabelOutputFormat::LabelMasterV4: return "LabelMaster V4 (13 fields)";
-    case LabelOutputFormat::LabelMasterV6: return "LabelMaster V6 / YOLO Pose (17 fields)";
+    case LabelOutputFormat::LabelMasterV6: return "LabelMaster V6 (19 fields)";
     }
     return "Unknown";
 }
@@ -576,42 +560,14 @@ QString dataSetName(DataSet format) {
     case DataSet::LabelMaster2: return "LabelMaster V2";
     case DataSet::LabelMaster3: return "LabelMaster V3";
     case DataSet::LabelMasterV4: return "LabelMaster V4";
-    case DataSet::LabelMasterV5: return "LabelMaster V5";
-    case DataSet::LabelMasterV6: return "LabelMaster V6 / YOLO Pose";
+    case DataSet::LabelMasterV5: return "LabelMaster V5 / legacy YOLO Pose";
+    case DataSet::LabelMasterV6: return "LabelMaster V6";
     case DataSet::HITSZ: return "HITSZ";
     case DataSet::UPC: return "UPC";
     case DataSet::NWPU: return "NWPU";
+    case DataSet::UnionSecret: return "UnionSecret 格式";
     }
     return "Unknown";
-}
-
-PoseClassScheme detectPoseClassScheme(const QStringList& labelPaths) {
-    bool foundClass  = false;
-    int maximumClass = -1;
-    for (const QString& path : labelPaths) {
-        QFile file(path);
-        if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-            continue;
-        QTextStream stream(&file);
-        while (!stream.atEnd()) {
-            QString line      = stream.readLine();
-            const int comment = line.indexOf('#');
-            if (comment >= 0)
-                line = line.left(comment);
-            const QStringList fields = line.simplified().split(' ', Qt::SkipEmptyParts);
-            if (fields.size() != 17)
-                continue;
-            bool ok           = false;
-            const int classId = fields[0].toInt(&ok);
-            if (!ok)
-                continue;
-            foundClass   = true;
-            maximumClass = std::max(maximumClass, classId);
-        }
-    }
-    if (!foundClass)
-        return PoseClassScheme::Classes36;
-    return maximumClass >= 14 ? PoseClassScheme::Classes36 : PoseClassScheme::Classes14;
 }
 
 FormatDetectionResult detectDataSetFormat(
@@ -619,25 +575,15 @@ FormatDetectionResult detectDataSetFormat(
     const std::function<void(int current, int total)>& progress) {
     FormatDetectionResult result;
     const QVector<DataSet> allFormats{
-        DataSet::LabelMasterV6,
-        DataSet::LabelMasterV5,
-        DataSet::LabelMasterV4,
-        DataSet::LabelMaster3,
-        DataSet::LabelMaster2,
-        DataSet::LabelMaster,
-        DataSet::HITSZ,
-        DataSet::UPC,
+        DataSet::LabelMasterV6, DataSet::LabelMasterV5, DataSet::LabelMasterV4,
+        DataSet::LabelMaster3,  DataSet::LabelMaster2,  DataSet::LabelMaster,
+        DataSet::HITSZ,         DataSet::UPC,           DataSet::UnionSecret,
         DataSet::NWPU,
     };
-    QVector<DataSet> commonCandidates = allFormats;
-    QStringList labelPaths;
-    labelPaths.reserve(samples.size());
-    for (const LabelFileSample& sample : samples)
-        labelPaths.push_back(sample.path);
-    result.poseClassScheme = detectPoseClassScheme(labelPaths);
-
-    const int total = static_cast<int>(samples.size());
-    int processed = 0;
+    QVector<int> candidateSupport(allFormats.size(), 0);
+    const int total              = static_cast<int>(samples.size());
+    int processed                = 0;
+    int candidateSampleCount     = 0;
     const auto reportProgress = [&] {
         ++processed;
         if (progress)
@@ -659,48 +605,61 @@ FormatDetectionResult detectDataSetFormat(
         QVector<DataSet> fileCandidates;
         for (DataSet format : allFormats) {
             QVector<Armor> parsed;
-            if (readLabelFile(
-                    sample.path, sample.imageSize, format, parsed, nullptr,
-                    result.poseClassScheme)) {
+            if (readLabelFile(sample.path, sample.imageSize, format, parsed, nullptr)) {
                 fileCandidates.push_back(format);
             }
         }
 
-        // V5 has two visibility fields plus an exact center-point invariant. These
-        // strong signatures take priority over the deliberately permissive V3 parser.
-        if (fileCandidates.contains(DataSet::LabelMasterV5))
-            fileCandidates.removeOne(DataSet::LabelMaster3);
-
         if (fileCandidates.isEmpty()) {
-            result.candidates.clear();
-            result.error = QString("%1 不符合任何已支持的标签格式")
-                               .arg(QFileInfo(sample.path).fileName());
-            return result;
+            result.invalidSamples.push_back(
+                {sample,
+                 QString("%1 不符合任何已支持的标签格式")
+                     .arg(QFileInfo(sample.path).fileName())});
+            reportProgress();
+            continue;
         }
-
-        QVector<DataSet> intersection;
-        for (DataSet candidate : commonCandidates) {
-            if (fileCandidates.contains(candidate))
-                intersection.push_back(candidate);
-        }
-        commonCandidates = intersection;
-        if (commonCandidates.isEmpty()) {
-            result.candidates.clear();
-            result.error = QString("目录内标签格式不一致，或 %1 与其他标签格式冲突")
-                               .arg(QFileInfo(sample.path).fileName());
-            return result;
+        ++candidateSampleCount;
+        for (int index = 0; index < allFormats.size(); ++index) {
+            if (fileCandidates.contains(allFormats[index]))
+                ++candidateSupport[index];
         }
         reportProgress();
     }
 
     if (!result.hasAnnotations) {
-        result.format = DataSet::LabelMasterV6;
-        result.candidates = {DataSet::LabelMasterV6};
-        result.poseClassScheme = PoseClassScheme::Classes36;
+        result.format        = DataSet::LabelMasterV6;
+        result.candidates    = {DataSet::LabelMasterV6};
         return result;
     }
 
+    if (candidateSampleCount == 0) {
+        result.candidates.clear();
+        result.error = "所有非空标签都不符合已支持格式，无法判断导入格式";
+        return result;
+    }
+
+    const int maximumSupport = *std::max_element(candidateSupport.cbegin(), candidateSupport.cend());
+    QVector<DataSet> commonCandidates;
+    for (int index = 0; index < allFormats.size(); ++index) {
+        if (candidateSupport[index] == maximumSupport)
+            commonCandidates.push_back(allFormats[index]);
+    }
     result.candidates = commonCandidates;
+    if (commonCandidates.contains(DataSet::LabelMaster)
+        && commonCandidates.contains(DataSet::UPC)) {
+        result.format              = DataSet::LabelMaster;
+        result.v1UpcChoiceRequired = true;
+        result.error = "10 字段标签无法自动区分 LabelMaster V1 与 UPC 格式";
+        return result;
+    }
+    if (commonCandidates.contains(DataSet::UnionSecret)
+        && commonCandidates.contains(DataSet::NWPU)) {
+        result.format                  = DataSet::UnionSecret;
+        result.nineFieldChoiceRequired = true;
+        result.error =
+            "9 字段 class_id 全部位于 0～38，无法自动区分 UnionSecret 格式与 NWPU 格式";
+        return result;
+    }
     if (commonCandidates.size() == 1) {
         result.format = commonCandidates.front();
         return result;
@@ -715,7 +674,7 @@ FormatDetectionResult detectDataSetFormat(
 
 bool readLabelFile(
     const QString& path, const QSize& imageSize, DataSet format, QVector<Armor>& armors,
-    QString* error, PoseClassScheme poseScheme) {
+    QString* error) {
     armors.clear();
     QFile file(path);
     if (!file.exists())
@@ -744,7 +703,7 @@ bool readLabelFile(
 
         Armor armor;
         QString lineError;
-        if (!parseLine(line.split(' '), imageSize, format, poseScheme, armor, lineError)) {
+        if (!parseLine(line.split(' '), imageSize, format, armor, lineError)) {
             setError(error, QString("第 %1 行格式错误: %2").arg(lineNumber).arg(lineError));
             armors.clear();
             return false;
@@ -754,9 +713,50 @@ bool readLabelFile(
     return true;
 }
 
+bool readLabelFileLenient(
+    const QString& path, const QSize& imageSize, DataSet format, QVector<Armor>& armors,
+    QStringList& lineErrors, QString* error) {
+    armors.clear();
+    lineErrors.clear();
+    QFile file(path);
+    if (!file.exists())
+        return true;
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        setError(error, QString("无法打开标签: %1").arg(path));
+        return false;
+    }
+
+    QTextStream stream(&file);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    stream.setEncoding(QStringConverter::Utf8);
+#else
+    stream.setCodec("UTF-8");
+#endif
+    int lineNumber = 0;
+    while (!stream.atEnd()) {
+        ++lineNumber;
+        QString line      = stream.readLine();
+        const int comment = line.indexOf('#');
+        if (comment >= 0)
+            line = line.left(comment);
+        line = line.simplified();
+        if (line.isEmpty())
+            continue;
+
+        Armor armor;
+        QString lineError;
+        if (!parseLine(line.split(' '), imageSize, format, armor, lineError)) {
+            lineErrors.push_back(QString("第 %1 行格式错误: %2").arg(lineNumber).arg(lineError));
+            continue;
+        }
+        armors.push_back(armor);
+    }
+    return true;
+}
+
 bool writeLabelFile(
     const QString& path, const QSize& imageSize, LabelOutputFormat format,
-    const QVector<Armor>& armors, QString* error, PoseClassScheme poseScheme) {
+    const QVector<Armor>& armors, QString* error) {
     if (imageSize.width() <= 0 || imageSize.height() <= 0) {
         setError(error, "图片尺寸无效");
         return false;
@@ -789,26 +789,14 @@ bool writeLabelFile(
         const auto points = normalizedPoints(armor, imageSize);
 
         if (format == LabelOutputFormat::LabelMasterV6) {
-            int poseClass = 0;
-            QString poseError;
-            if (!encodePoseClass(armor, poseScheme, poseClass, poseError)) {
-                setError(
-                    error,
-                    QString("第 %1 个标注无法编码 class_id: %2").arg(index + 1).arg(poseError));
-                file.cancelWriting();
-                return false;
-            }
-            const BoundingBox bbox = std::isfinite(armor.norm_x) && std::isfinite(armor.norm_y)
-                    && std::isfinite(armor.norm_w) && std::isfinite(armor.norm_h)
-                    && armor.norm_w >= 0.0 && armor.norm_h >= 0.0
-                ? BoundingBox{
-                      armor.norm_x,
-                      armor.norm_y,
-                      armor.norm_w,
-                      armor.norm_h}
-                : projectedBoundingBox(armor, imageSize);
-            stream << poseClass << ' ' << bbox.centerX << ' ' << bbox.centerY << ' ' << bbox.width
-                   << ' ' << bbox.height;
+            const BoundingBox bbox =
+                std::isfinite(armor.norm_x) && std::isfinite(armor.norm_y)
+                        && std::isfinite(armor.norm_w) && std::isfinite(armor.norm_h)
+                        && armor.norm_w >= 0.0 && armor.norm_h >= 0.0
+                    ? BoundingBox{armor.norm_x, armor.norm_y, armor.norm_w, armor.norm_h}
+                    : projectedBoundingBox(armor, imageSize);
+            stream << colorId << ' ' << armor.size << ' ' << classId << ' ' << bbox.centerX << ' '
+                   << bbox.centerY << ' ' << bbox.width << ' ' << bbox.height;
             for (int pointIndex = 0; pointIndex < 4; ++pointIndex) {
                 const int visibility = armor.keypointVisibility[pointIndex];
                 if (visibility < 0 || visibility > 2) {
@@ -829,7 +817,14 @@ bool writeLabelFile(
 
         const BoundingBox bbox = projectedBoundingBox(armor, imageSize);
         if (format == LabelOutputFormat::LabelMasterV4) {
-            stream << encodeV4Class(colorId, armor.size, classId) << ' ' << bbox.centerX << ' '
+            int encoded = 0;
+            QString encodeError;
+            if (!encodeV4Class(colorId, armor.size, classId, encoded, encodeError)) {
+                setError(error, QString("第 %1 个标注无法写入 V4：%2").arg(index + 1).arg(encodeError));
+                file.cancelWriting();
+                return false;
+            }
+            stream << encoded << ' ' << bbox.centerX << ' '
                    << bbox.centerY << ' ' << bbox.width << ' ' << bbox.height << ' ';
         } else {
             stream << colorId << ' ' << armor.size << ' ' << classId << ' ';
@@ -856,11 +851,11 @@ bool writeLabelFile(
 
 bool convertLabelFile(
     const QString& path, const QSize& imageSize, DataSet source, LabelOutputFormat target,
-    QString* error, PoseClassScheme poseScheme) {
+    QString* error) {
     QVector<Armor> armors;
-    if (!readLabelFile(path, imageSize, source, armors, error, poseScheme))
+    if (!readLabelFile(path, imageSize, source, armors, error))
         return false;
-    return writeLabelFile(path, imageSize, target, armors, error, poseScheme);
+    return writeLabelFile(path, imageSize, target, armors, error);
 }
 
 } // namespace labelmaster::service::label_format

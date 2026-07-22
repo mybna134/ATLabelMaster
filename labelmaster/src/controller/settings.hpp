@@ -69,7 +69,6 @@ public:
     APP_SETTING_RW_FLOAT(vRate, Keys::kvRate, Def::kVRate)
     APP_SETTING_RW_STR(theme, Keys::kTheme, Def::kTheme)
     APP_SETTING_RW_INT(outputFormat, Keys::kOutputFormat, Def::kOutputFormat)
-    APP_SETTING_RW_INT(v6ClassScheme, Keys::kV6ClassScheme, Def::kV6ClassScheme)
 
 #undef APP_SETTING_RW_STR
 #undef APP_SETTING_RW_INT
@@ -82,7 +81,7 @@ public:
     AppSettings& operator=(AppSettings&&)      = delete;
 
 private:
-    AppSettings(); // 仅 instance() 可用
+    AppSettings();                                  // 仅 instance() 可用
 
     struct Keys {
         static constexpr const char* kSaveDir                   = "dataset/saveDir";
@@ -98,11 +97,11 @@ private:
         static constexpr const char* kNumberClassifierThreshold = "detector/tradition/threshold";
         static constexpr const char* kTheme                     = "ui/theme";
         static constexpr const char* kOutputFormat              = "dataset/outputFormat";
-        static constexpr const char* kV6ClassScheme             = "dataset/v6ClassScheme";
     };
     struct Def {
-        static constexpr const char* kSaveDir             = ""; // 自动复用同级 labels/，否则使用 label/
-        static constexpr const char* kAssetsDir           = "/usr/opt/LabelMaster/assets"; //应用启动时会自动设置当前Application目录
+        static constexpr const char* kSaveDir = ""; // 自动复用同级 labels/，否则使用 label/
+        static constexpr const char* kAssetsDir =
+            "/usr/opt/LabelMaster/assets"; // 应用启动时会自动设置当前Application目录
         static constexpr bool kAutoSave                   = false;
         static constexpr bool kAutoEnhanceV               = false;
         static constexpr bool kFixedRoi                   = false;
@@ -111,8 +110,7 @@ private:
         static constexpr float kNumberClassifierThreshold = 80.f;
         static constexpr const float kVRate               = 4;
         static constexpr const char* kTheme               = "retro";
-        static constexpr const int kOutputFormat          = 3;  // LabelMaster V6 / YOLO Pose
-        static constexpr const int kV6ClassScheme         = 36;
+        static constexpr const int kOutputFormat          = 3; // LabelMaster V6（19 字段）
     };
 
     QSettings settings_;

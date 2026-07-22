@@ -13,6 +13,7 @@ class QKeyEvent;
 class QDragEnterEvent;
 class QDropEvent;
 class QCloseEvent;
+class QEvent;
 QT_END_NAMESPACE
 
 namespace ui {
@@ -38,6 +39,8 @@ signals:
     void sigDeleteRequested();
     void sigSmartAnnotateRequested();
     void sigSettingsRequested();
+    void sigFilterRequested();
+    void sigForceMergeConflictRequested();
     void sigGetStasRequested(int colorId, int classId, int sizeId);
     void sigFileActivated(const QModelIndex&);
     void sigDroppedPaths(const QStringList&);
@@ -63,11 +66,13 @@ public slots:
     void setBusy(bool on);
     void setUiEnabled(bool on);
     void setRoot(const QModelIndex& idx);
+    void setConflictMode(bool enabled, int remaining);
 
     // —— 标签内容查看器 ——
     void setLabelContent(const QString& content);
 
 protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void keyPressEvent(QKeyEvent* e) override;
     void dragEnterEvent(QDragEnterEvent* e) override;
     void dropEvent(QDropEvent* e) override;
@@ -83,8 +88,6 @@ private:
     bool logTimestamp_    = true;
     bool dragDropEnabled_ = true;
 
-    // 当前选中的类别（用于键盘快捷键1-9选择）
-    QString currentClass_ = QStringLiteral("G");
 };
 
 } // namespace ui

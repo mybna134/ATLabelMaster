@@ -151,7 +151,7 @@
     <item row="3" column="0" colspan="2">
      <widget class="QGroupBox" name="visibilityGroup">
       <property name="title">
-       <string>Keypoint Visibility (V6)</string>
+       <string>Keypoint Visibility (0 Invisible / 1 Out / 2 Visible)</string>
       </property>
       <layout class="QGridLayout" name="visibilityLayout">
        <item row="0" column="0">
@@ -185,24 +185,28 @@
        <item row="1" column="0">
         <widget class="QComboBox" name="vis0Combo">
          <item><property name="text"><string>0 Invisible</string></property></item>
+         <item><property name="text"><string>1 Out of bounds</string></property></item>
          <item><property name="text"><string>2 Visible</string></property></item>
         </widget>
        </item>
        <item row="1" column="1">
         <widget class="QComboBox" name="vis1Combo">
          <item><property name="text"><string>0 Invisible</string></property></item>
+         <item><property name="text"><string>1 Out of bounds</string></property></item>
          <item><property name="text"><string>2 Visible</string></property></item>
         </widget>
        </item>
        <item row="1" column="2">
         <widget class="QComboBox" name="vis2Combo">
          <item><property name="text"><string>0 Invisible</string></property></item>
+         <item><property name="text"><string>1 Out of bounds</string></property></item>
          <item><property name="text"><string>2 Visible</string></property></item>
         </widget>
        </item>
        <item row="1" column="3">
         <widget class="QComboBox" name="vis3Combo">
          <item><property name="text"><string>0 Invisible</string></property></item>
+         <item><property name="text"><string>1 Out of bounds</string></property></item>
          <item><property name="text"><string>2 Visible</string></property></item>
         </widget>
        </item>

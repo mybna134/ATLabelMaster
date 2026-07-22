@@ -20,11 +20,11 @@ enum class DataSet : unsigned char {
     // L5（五号平衡） 	11
     UPC,  // RPS
     NWPU, // 西北工业大学
-    // color * 16 + size * 8 + class
     LabelMaster3,  // 新增: 15字段 (color size cls xywh pts)
-    LabelMasterV4, // 新增: 13字段 (cls xywh pts) cls=color*size*num
-    LabelMasterV5, // Bevy Simulator 15字段（含左右灯条可见性）
-    LabelMasterV6, // YOLO Pose 17字段（bbox + 四角点逐点可见性）
+    LabelMasterV4, // 13字段（36类组合类别 + bbox + 四角点）
+    LabelMasterV5, // 旧 YOLO Pose 17字段（14类组合类别 + bbox + 四角点逐点可见性）
+    LabelMasterV6, // 19字段（color size class + bbox + 四角点逐点可见性）
+    UnionSecret,   // 9字段（39类组合类别 + 四角点），每种颜色占13个类别
 };
 
 enum class LabelOutputFormat : int {
@@ -32,11 +32,6 @@ enum class LabelOutputFormat : int {
     RectPoints15  = 1,
     LabelMasterV4 = 2,
     LabelMasterV6 = 3,
-};
-
-enum class PoseClassScheme : int {
-    Classes14 = 14,
-    Classes36 = 36,
 };
 
 constexpr bool supportsVisibility(DataSet format) {
@@ -47,11 +42,13 @@ constexpr bool supportsVisibility(LabelOutputFormat format) {
     return format == LabelOutputFormat::LabelMasterV6;
 }
 
-constexpr bool isDirectOpenFormat(DataSet format) {
-    return format == DataSet::LabelMasterV4 || format == DataSet::LabelMasterV6;
+constexpr bool supportsBoundingBox(LabelOutputFormat format) {
+    return format == LabelOutputFormat::RectPoints15 || format == LabelOutputFormat::LabelMasterV4
+        || format == LabelOutputFormat::LabelMasterV6;
 }
 
-constexpr LabelOutputFormat canonicalOutputFormat(DataSet input) {
-    return supportsVisibility(input) ? LabelOutputFormat::LabelMasterV6
-                                     : LabelOutputFormat::LabelMasterV4;
+constexpr bool isDirectOpenFormat(DataSet format) { return format == DataSet::LabelMasterV6; }
+
+constexpr LabelOutputFormat canonicalOutputFormat(DataSet) {
+    return LabelOutputFormat::LabelMasterV6;
 }

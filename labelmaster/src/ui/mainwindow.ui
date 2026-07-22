@@ -275,8 +275,21 @@
         </widget>
        </item>
        <item>
-        <widget class="QTreeView" name="file_tree_view"/>
-       </item>
+       <widget class="QTreeView" name="file_tree_view"/>
+      </item>
+      <item>
+       <widget class="QPushButton" name="merge_conflict_button">
+        <property name="visible">
+         <bool>false</bool>
+        </property>
+        <property name="text">
+         <string>强制合并（跳过校验）</string>
+        </property>
+        <property name="toolTip">
+         <string>不验证 V6 格式，直接将当前 stage 样本放回原数据集</string>
+        </property>
+       </widget>
+      </item>
       </layout>
      </widget>
     </item>
@@ -317,6 +330,7 @@
     </property>
     <addaction name="actionSettings"/>
     <addaction name="actionStas"/>
+    <addaction name="actionFilter"/>
    </widget>
    <addaction name="menuFile"/>
    <addaction name="menuEdit"/>
@@ -399,6 +413,15 @@
    </property>
    <property name="shortcut">
     <string>F1</string>
+   </property>
+  </action>
+
+  <action name="actionFilter">
+   <property name="text">
+    <string>筛选模式</string>
+   </property>
+   <property name="toolTip">
+    <string>按 color、size、class 组合筛选图片</string>
    </property>
   </action>
 

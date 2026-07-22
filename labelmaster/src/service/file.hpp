@@ -17,6 +17,10 @@ class QFileSystemModel;
 class QSortFilterProxyModel;
 class QImage;
 
+namespace labelmaster::service::label_format {
+struct LabelFileSample;
+}
+
 class FileService : public QObject {
     Q_OBJECT
 public:
@@ -28,8 +32,9 @@ public:
 public slots:
     // === 打开 ===
     void openFolderDialog(const DataSet& type = DataSet::Auto); // 弹框选目录
-    void openPaths(const QStringList&);                                 // 拖拽/命令行路径
-    void openIndex(const QModelIndex&);                                 // 由文件树激活
+    void openPaths(const QStringList&);                         // 拖拽/命令行路径
+    void openIndex(const QModelIndex&);                         // 由文件树激活
+    void startFiltering();                                      // 按标签组合筛选并复核
 
     // === 浏览 ===
     void next(bool allowAutoSave = true);
@@ -40,6 +45,7 @@ public slots:
 
     // === 保存标注 ===
     void saveData(const QVector<Armor>& armors, const QImage& image, bool needSaveImg);
+    void forceMergeCurrentConflict();
 
     // === 获取统计信息 ==
     void getStas(int colorId, int classId, int sizeId);
@@ -52,10 +58,11 @@ signals:
     void imageReady(const QImage& img);
     void status(const QString& msg, int ms = 3000);
     void busy(bool on);
+    void conflictModeChanged(bool enabled, int remaining);
 
     // === 打开图片时加载到的标注 ===
     void labelsLoaded(const QVector<Armor>& armors);
-    void labelTextChanged(const QString& labelText);  // 标签文件文本内容
+    void labelTextChanged(const QString& labelText); // 标签文件文本内容
     // ===统计信息获取==
     void StasGetted(const int& targetCount, const int& fileCount);
     // ===自动保存===
@@ -66,12 +73,27 @@ private:
     void selectFirst(const QString& path);
     bool openDir(const QString& dir);
     bool openFileAt(const QModelIndex& proxyIndex);
-    bool tryImportDataSetAfterLoaded();
+    void startPendingImport();
+    bool tryImportPendingDataSet();
     void tryOpenFirstAfterLoaded(const QString& dir);
     QModelIndex findFirstImageUnder(const QModelIndex& proxyRoot) const;
     QModelIndex mapFromProxyToSource(const QModelIndex&) const;
     QModelIndex mapFromSourceToProxy(const QModelIndex&) const;
     bool isImageFile(const QString& path) const;
+    bool maybeEnterExistingStage(const QString& imageDir);
+    void finishConflictModeIfEmpty();
+    QString dataSetRootForImageDir(const QString& imageDir) const;
+    QString stageLabelForImage(const QString& stageImagePath) const;
+    bool stageInvalidSample(
+        const labelmaster::service::label_format::LabelFileSample& sample, DataSet sourceFormat,
+        const QString& error, QString& operationError);
+    bool tryAutoResolveConflict(
+        const QString& stageImagePath, bool& resolved, bool& converted, QString& error);
+    bool restoreConflict(const QString& stageImagePath, bool force, QString& error);
+    bool restoreCurrentConflict(bool force, QString& error);
+    bool loadStageManifest();
+    bool saveStageManifest(QString* error = nullptr) const;
+    void refreshConflictDirectory();
 
     // 记忆 & 恢复
     void saveLastVisited(const QString& imagePath);
@@ -82,21 +104,37 @@ private:
     static QString labelFileForImage(const QString& imagePath);
     static bool writeLabelFile(
         const QString& labelPath, const QVector<Armor>& armors,
-        const QSize& imgSize);                                         // 保存为归一化
-    static QVector<Armor>
-        readLabelFile(
-            const QString& labelPath, const QSize& imgSize,
-            DataSet format); // 按当前数据集格式读取并反归一化
+        const QSize& imgSize);               // 保存为归一化
+    static QVector<Armor> readLabelFile(
+        const QString& labelPath, const QSize& imgSize,
+        DataSet format);                     // 按当前数据集格式读取并反归一化
 
 private:
+    struct StageEntry {
+        QString stageImagePath;
+        QString stageLabelPath;
+        QString originalImagePath;
+        QString originalLabelPath;
+        QString error;
+        DataSet sourceFormat = DataSet::Auto;
+    };
+
     QString pendingDir_;
     QString pendingTargetPath_;
-    QFileSystemModel* fsModel_    = nullptr;                           // 源模型
-    QSortFilterProxyModel* proxy_ = nullptr;                           // 只显示图片与目录
+    QFileSystemModel* fsModel_    = nullptr; // 源模型
+    QSortFilterProxyModel* proxy_ = nullptr; // 只显示图片与目录
     QPersistentModelIndex proxyRoot_;
     QPersistentModelIndex proxyCurrent_;
-    QString currentImagePath_;                                         // 当前图片绝对路径
-    QSize currentImageSize_;                                           // 当前图片尺寸（归一化需要）
-    DataSet currentDataSet = DataSet::Auto;
+    QString currentImagePath_;               // 当前图片绝对路径
+    QSize currentImageSize_;                 // 当前图片尺寸（归一化需要）
+    DataSet currentDataSet         = DataSet::Auto;
     bool formatDetectionAttempted_ = false;
+    bool formatDetectionFinished_  = false;
+    int pendingImageCount_         = -1;
+    bool conflictMode_             = false;
+    QString originalImageDir_;
+    QString stageRoot_;
+    QString stageImagesDir_;
+    QString stageLabelsDir_;
+    QVector<StageEntry> stageEntries_;
 };
