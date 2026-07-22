@@ -12,13 +12,28 @@ namespace labelmaster::service::label_format {
 
 struct LabelFileSample {
     QString path;
-    QSize imageSize;
     QString imagePath;
 };
 
 struct LabelFileIssue {
     LabelFileSample sample;
     QString error;
+};
+
+struct ParsedLabelCandidate {
+    DataSet format = DataSet::Auto;
+    QVector<Armor> armors;
+};
+
+// 批量检测阶段的解析缓存。坐标保存在归一化空间（等价于以 1x1 图片解析），
+// 后续转换可以直接写出，不需要再次打开 label 或读取图片尺寸。
+struct ParsedLabelFile {
+    LabelFileSample sample;
+    QVector<ParsedLabelCandidate> candidates;
+    bool hasAnnotations = false;
+    QString error;
+
+    const QVector<Armor>* armorsFor(DataSet format) const;
 };
 
 struct FormatDetectionResult {
@@ -28,6 +43,7 @@ struct FormatDetectionResult {
     bool v1UpcChoiceRequired     = false;
     bool nineFieldChoiceRequired = false;
     QVector<LabelFileIssue> invalidSamples;
+    QVector<ParsedLabelFile> parsedFiles;
     QString error;
 
     bool succeeded() const {

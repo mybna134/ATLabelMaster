@@ -7,6 +7,7 @@
 #include <QModelIndex>
 #include <QObject>
 #include <QPersistentModelIndex>
+#include <QSet>
 #include <QSize>
 #include <QStringList>
 #include <QVector>
@@ -74,7 +75,8 @@ private:
     bool openDir(const QString& dir);
     bool openFileAt(const QModelIndex& proxyIndex);
     void startPendingImport();
-    bool tryImportPendingDataSet();
+    bool tryImportPendingDataSet(const QStringList& imagePaths);
+    bool collectLoadedImagePaths(const QString& dir, QStringList& imagePaths);
     void tryOpenFirstAfterLoaded(const QString& dir);
     QModelIndex findFirstImageUnder(const QModelIndex& proxyRoot) const;
     QModelIndex mapFromProxyToSource(const QModelIndex&) const;
@@ -84,9 +86,6 @@ private:
     void finishConflictModeIfEmpty();
     QString dataSetRootForImageDir(const QString& imageDir) const;
     QString stageLabelForImage(const QString& stageImagePath) const;
-    bool stageInvalidSample(
-        const labelmaster::service::label_format::LabelFileSample& sample, DataSet sourceFormat,
-        const QString& error, QString& operationError);
     bool tryAutoResolveConflict(
         const QString& stageImagePath, bool& resolved, bool& converted, QString& error);
     bool restoreConflict(const QString& stageImagePath, bool force, QString& error);
@@ -130,7 +129,9 @@ private:
     DataSet currentDataSet         = DataSet::Auto;
     bool formatDetectionAttempted_ = false;
     bool formatDetectionFinished_  = false;
+    bool pendingImportScheduled_    = false;
     int pendingImageCount_         = -1;
+    QSet<QString> pendingDirectoryLoads_;
     bool conflictMode_             = false;
     QString originalImageDir_;
     QString stageRoot_;

@@ -26,6 +26,7 @@ find_package(OpenCV REQUIRED)
 find_package(OpenVINO REQUIRED)
 find_package(Eigen3 REQUIRED NO_MODULE)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Svg)
+find_package(Threads REQUIRED)
 
 add_executable(${PROJECT_NAME} ${SRC_FILES})
 
@@ -41,6 +42,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Svg
     ${OpenCV_LIBS}
     openvino::runtime
+    Threads::Threads
 )
 
 install(TARGETS ${PROJECT_NAME}

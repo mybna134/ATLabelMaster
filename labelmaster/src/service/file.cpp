@@ -67,8 +67,14 @@
 #include <QWhatsThis>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <future>
 #include <limits>
+#include <thread>
+#include <utility>
+#include <vector>
 
 #include "../ui/filter_dialog.hpp"
 #include "../ui/stas_dialog.h"
@@ -79,6 +85,76 @@
 namespace {
 static const QStringList kImgExt = {"*.png", "*.jpg", "*.jpeg", "*.bmp",
                                     "*.gif", "*.tif", "*.tiff", "*.webp"};
+constexpr int kProgressRefreshMs    = 75;
+constexpr int kBatchWorkerCount     = 8;
+constexpr int kIsolationWorkerCount = 2;
+constexpr int kBatchChunkSize       = 32;
+
+template <typename Function>
+void parallelForChunks(int count, int workerCount, int chunkSize, Function&& function) {
+    if (count <= 0)
+        return;
+    const int threadCount = std::min(workerCount, count);
+    const int effectiveChunkSize =
+        std::min(chunkSize, std::max(1, (count + threadCount - 1) / threadCount));
+    std::atomic<int> next{0};
+    std::vector<std::thread> workers;
+    workers.reserve(threadCount);
+    for (int worker = 0; worker < threadCount; ++worker) {
+        workers.emplace_back([&] {
+            while (true) {
+                const int begin = next.fetch_add(effectiveChunkSize, std::memory_order_relaxed);
+                if (begin >= count)
+                    return;
+                const int end = std::min(begin + effectiveChunkSize, count);
+                for (int index = begin; index < end; ++index)
+                    function(index);
+            }
+        });
+    }
+    for (std::thread& worker : workers)
+        worker.join();
+}
+
+template <typename Work, typename Tick>
+auto runBackgroundWithProgress(Work&& work, Tick&& tick) {
+    auto future = std::async(std::launch::async, std::forward<Work>(work));
+    while (future.wait_for(std::chrono::milliseconds(kProgressRefreshMs))
+           != std::future_status::ready) {
+        tick();
+    }
+    tick();
+    return future.get();
+}
+
+class DirectoryModelRefreshPause {
+public:
+    DirectoryModelRefreshPause(QFileSystemModel* model, QSortFilterProxyModel* proxy)
+        : model_(model)
+        , proxy_(proxy)
+        , wasWatching_(model && !model->testOption(QFileSystemModel::DontWatchForChanges))
+        , wasDynamic_(proxy && proxy->dynamicSortFilter()) {
+        if (wasWatching_)
+            model_->setOption(QFileSystemModel::DontWatchForChanges, true);
+        if (wasDynamic_)
+            proxy_->setDynamicSortFilter(false);
+    }
+
+    ~DirectoryModelRefreshPause() {
+        if (wasWatching_)
+            model_->setOption(QFileSystemModel::DontWatchForChanges, false);
+        if (wasDynamic_)
+            proxy_->setDynamicSortFilter(true);
+        if (proxy_)
+            proxy_->invalidate();
+    }
+
+private:
+    QFileSystemModel* model_       = nullptr;
+    QSortFilterProxyModel* proxy_  = nullptr;
+    bool wasWatching_              = false;
+    bool wasDynamic_               = false;
+};
 
 class ImageFilterProxy : public QSortFilterProxyModel {
 public:
@@ -487,15 +563,22 @@ void FileService::startFiltering() {
     progress.show();
     QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
-    QDirIterator iterator(imageDir, kImgExt, QDir::Files, QDirIterator::Subdirectories);
+    QStringList imagePaths;
+    if (!collectLoadedImagePaths(imageDir, imagePaths)) {
+        progress.close();
+        emit status(tr("目录模型仍在加载，请稍后重试筛选"), 3000);
+        return;
+    }
+    QElapsedTimer scanRefreshTimer;
+    scanRefreshTimer.start();
     int scanned = 0;
-    while (iterator.hasNext()) {
-        const QString imagePath = iterator.next();
+    for (const QString& imagePath : imagePaths) {
         const QString labelPath = labelFileForImage(imagePath);
         ++scanned;
-        if (scanned == 1 || scanned % 20 == 0) {
+        if (scanRefreshTimer.elapsed() >= kProgressRefreshMs) {
             progress.setLabelText(tr("正在扫描第 %1 张图片…").arg(scanned));
             QApplication::processEvents();
+            scanRefreshTimer.restart();
             if (progress.wasCanceled())
                 return;
         }
@@ -503,14 +586,10 @@ void FileService::startFiltering() {
             continue;
         visitedLabels.insert(labelPath);
 
-        QImageReader reader(imagePath);
-        const QSize imageSize = reader.size();
-        if (imageSize.isEmpty())
-            continue;
         QVector<Armor> armors;
         QString error;
         if (!labelmaster::service::label_format::readLabelFile(
-                labelPath, imageSize, DataSet::LabelMasterV6, armors, &error)) {
+                labelPath, QSize(1, 1), DataSet::LabelMasterV6, armors, &error)) {
             progress.close();
             QMessageBox::critical(
                 QApplication::activeWindow(), tr("筛选失败"),
@@ -558,32 +637,78 @@ void FileService::startFiltering() {
         entry.originalImagePath = candidate.imagePath;
         entry.originalLabelPath = candidate.labelPath;
 
-        QString error;
-        if (!moveFileWithoutOverwrite(candidate.labelPath, entry.filteredLabelPath, error)) {
-            progress.close();
-            QMessageBox::critical(QApplication::activeWindow(), tr("筛选移动失败"), error);
-            break;
-        }
-        if (!moveFileWithoutOverwrite(candidate.imagePath, entry.filteredImagePath, error)) {
-            QString rollbackError;
-            moveFileWithoutOverwrite(entry.filteredLabelPath, candidate.labelPath, rollbackError);
-            progress.close();
-            QMessageBox::critical(QApplication::activeWindow(), tr("筛选移动失败"), error);
-            break;
-        }
         entries.push_back(entry);
-        if (!ui::saveFilterManifest(filteringRoot, entries, &error)) {
-            QString rollbackError;
-            entries.removeLast();
-            moveFileWithoutOverwrite(entry.filteredImagePath, candidate.imagePath, rollbackError);
-            moveFileWithoutOverwrite(entry.filteredLabelPath, candidate.labelPath, rollbackError);
-            progress.close();
-            QMessageBox::critical(QApplication::activeWindow(), tr("筛选清单写入失败"), error);
+    }
+
+    std::vector<QString> moveErrors(static_cast<size_t>(entries.size()));
+    std::vector<char> movedSuccessfully(static_cast<size_t>(entries.size()), 0);
+    std::atomic<int> moved{0};
+    {
+        DirectoryModelRefreshPause pause(fsModel_, proxy_);
+        runBackgroundWithProgress(
+            [&] {
+                parallelForChunks(
+                    entries.size(), kIsolationWorkerCount, kBatchChunkSize, [&](int index) {
+                        const FilterCandidate& candidate = candidates[index];
+                        const ui::FilterReviewEntry& entry = entries[index];
+                        QString& error = moveErrors[static_cast<size_t>(index)];
+                        if (!moveFileWithoutOverwrite(
+                                candidate.labelPath, entry.filteredLabelPath, error)) {
+                            moved.fetch_add(1, std::memory_order_relaxed);
+                            return;
+                        }
+                        if (!moveFileWithoutOverwrite(
+                                candidate.imagePath, entry.filteredImagePath, error)) {
+                            QString rollbackError;
+                            moveFileWithoutOverwrite(
+                                entry.filteredLabelPath, candidate.labelPath, rollbackError);
+                        } else {
+                            movedSuccessfully[static_cast<size_t>(index)] = 1;
+                        }
+                        moved.fetch_add(1, std::memory_order_relaxed);
+                    });
+            },
+            [&] {
+                const int current = moved.load(std::memory_order_relaxed);
+                progress.setValue(current);
+                progress.setLabelText(
+                    tr("正在移动匹配样本 %1/%2").arg(current).arg(entries.size()));
+                QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+            });
+    }
+
+    QString batchError;
+    for (const QString& error : moveErrors) {
+        if (!error.isEmpty()) {
+            batchError = error;
             break;
         }
-        progress.setValue(index + 1);
-        progress.setLabelText(tr("正在移动匹配样本 %1/%2").arg(index + 1).arg(candidates.size()));
-        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    }
+    if (!batchError.isEmpty()) {
+        for (int index = 0; index < entries.size(); ++index) {
+            if (!movedSuccessfully[static_cast<size_t>(index)])
+                continue;
+            QString rollbackError;
+            moveFileWithoutOverwrite(
+                entries[index].filteredImagePath, candidates[index].imagePath, rollbackError);
+            moveFileWithoutOverwrite(
+                entries[index].filteredLabelPath, candidates[index].labelPath, rollbackError);
+        }
+        progress.close();
+        QMessageBox::critical(QApplication::activeWindow(), tr("筛选移动失败"), batchError);
+        return;
+    }
+    if (!ui::saveFilterManifest(filteringRoot, entries, &batchError)) {
+        for (int index = 0; index < entries.size(); ++index) {
+            QString rollbackError;
+            moveFileWithoutOverwrite(
+                entries[index].filteredImagePath, candidates[index].imagePath, rollbackError);
+            moveFileWithoutOverwrite(
+                entries[index].filteredLabelPath, candidates[index].labelPath, rollbackError);
+        }
+        progress.close();
+        QMessageBox::critical(QApplication::activeWindow(), tr("筛选清单写入失败"), batchError);
+        return;
     }
     progress.close();
 
@@ -603,12 +728,19 @@ void FileService::selectFirst(const QString& path) {
     if (!(path == pendingDir_ || path.startsWith(pendingDir_ + '/'))) {
         return;
     };
+    pendingDirectoryLoads_.remove(QDir::cleanPath(path));
     if (formatDetectionAttempted_) {
         if (formatDetectionFinished_)
             tryOpenFirstAfterLoaded(pendingDir_);
         return;
     }
-    startPendingImport();
+    if (pendingImportScheduled_)
+        return;
+    pendingImportScheduled_ = true;
+    QTimer::singleShot(0, this, [this] {
+        pendingImportScheduled_ = false;
+        startPendingImport();
+    });
 }
 // BFS 找第一张图片（跨多层）
 QModelIndex FileService::findFirstImageUnder(const QModelIndex& proxyRoot) const {
@@ -636,6 +768,49 @@ QModelIndex FileService::findFirstImageUnder(const QModelIndex& proxyRoot) const
         }
     }
     return {};
+}
+
+bool FileService::collectLoadedImagePaths(const QString& dir, QStringList& imagePaths) {
+    imagePaths.clear();
+    const QModelIndex root = fsModel_->index(QDir::cleanPath(dir));
+    if (!root.isValid())
+        return false;
+
+    bool loading = false;
+    QQueue<QModelIndex> directories;
+    directories.enqueue(root);
+    while (!directories.isEmpty()) {
+        const QModelIndex parent = directories.dequeue();
+        const QString parentPath = QDir::cleanPath(fsModel_->filePath(parent));
+        if (pendingDirectoryLoads_.contains(parentPath)) {
+            loading = true;
+            continue;
+        }
+        if (fsModel_->canFetchMore(parent)) {
+            pendingDirectoryLoads_.insert(parentPath);
+            fsModel_->fetchMore(parent);
+            loading = true;
+            continue;
+        }
+        const int rows = fsModel_->rowCount(parent);
+        for (int row = 0; row < rows; ++row) {
+            const QModelIndex child = fsModel_->index(row, 0, parent);
+            if (!child.isValid())
+                continue;
+            if (fsModel_->isDir(child)) {
+                directories.enqueue(child);
+                continue;
+            }
+            const QString path = fsModel_->filePath(child);
+            if (isImageFile(path))
+                imagePaths.push_back(path);
+        }
+    }
+    if (loading) {
+        imagePaths.clear();
+        return false;
+    }
+    return true;
 }
 
 bool FileService::openFileAt(const QModelIndex& proxyIndex) {
@@ -932,54 +1107,9 @@ bool FileService::maybeEnterExistingStage(const QString& imageDir) {
     currentDataSet = DataSet::LabelMasterV6;
     controller::AppSettings::instance().setoutputFormat(
         static_cast<int>(LabelOutputFormat::LabelMasterV6));
-    int remaining = 0;
-    QDirIterator iterator(stageImagesDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
-    while (iterator.hasNext()) {
-        iterator.next();
-        ++remaining;
-    }
+    const int remaining = std::max(1, static_cast<int>(stageEntries_.size()));
     emit conflictModeChanged(true, remaining);
     emit status(tr("检测到未处理的 stage，进入冲突处理模式"), 5000);
-    return true;
-}
-
-bool FileService::stageInvalidSample(
-    const labelmaster::service::label_format::LabelFileSample& sample, DataSet sourceFormat,
-    const QString& sampleError, QString& operationError) {
-    if (sample.imagePath.isEmpty() || originalImageDir_.isEmpty()) {
-        operationError = tr("无法确定冲突样本的原始图片路径");
-        return false;
-    }
-    QDir().mkpath(stageImagesDir_);
-    QDir().mkpath(stageLabelsDir_);
-
-    const QString relativeImage = QDir(originalImageDir_).relativeFilePath(sample.imagePath);
-    const QString stagedImage   = QDir::cleanPath(QDir(stageImagesDir_).filePath(relativeImage));
-    const QString stagedLabel   = stageLabelForImage(stagedImage);
-
-    if (!moveFileWithoutOverwrite(sample.path, stagedLabel, operationError))
-        return false;
-    if (!moveFileWithoutOverwrite(sample.imagePath, stagedImage, operationError)) {
-        QString rollbackError;
-        moveFileWithoutOverwrite(stagedLabel, sample.path, rollbackError);
-        return false;
-    }
-
-    StageEntry entry;
-    entry.stageImagePath    = stagedImage;
-    entry.stageLabelPath    = stagedLabel;
-    entry.originalImagePath = sample.imagePath;
-    entry.originalLabelPath = sample.path;
-    entry.error             = sampleError;
-    entry.sourceFormat      = sourceFormat;
-    stageEntries_.push_back(entry);
-    if (!saveStageManifest(&operationError)) {
-        stageEntries_.removeLast();
-        QString rollbackError;
-        moveFileWithoutOverwrite(stagedImage, sample.imagePath, rollbackError);
-        moveFileWithoutOverwrite(stagedLabel, sample.path, rollbackError);
-        return false;
-    }
     return true;
 }
 
@@ -994,11 +1124,13 @@ bool FileService::openDir(const QString& dir) {
     pendingDir_               = cleanDir; // 不清空 pendingTargetPath_，以便恢复时指定目标文件
     formatDetectionAttempted_ = false;
     formatDetectionFinished_  = false;
+    pendingImportScheduled_   = false;
     pendingImageCount_        = -1;
+    pendingDirectoryLoads_.clear();
     if (lastDir == cleanDir) {
-        LOGI(QString("重新扫描已打开目录：%1").arg(cleanDir));
-        QTimer::singleShot(0, this, &FileService::startPendingImport);
-        return true;
+        // 批处理期间 watcher 被暂停，重新打开同一路径时通过模型自身统一刷新一次。
+        LOGI(QString("刷新已打开目录：%1").arg(cleanDir));
+        fsModel_->setRootPath(QString());
     }
     const QModelIndex srcRoot = fsModel_->setRootPath(cleanDir); // 异步开始
     if (!srcRoot.isValid()) {
@@ -1014,12 +1146,7 @@ bool FileService::openDir(const QString& dir) {
 
     emit status(tr("打开目录：%1").arg(cleanDir));
     LOGI(QString("打开目录：%1").arg(cleanDir));
-    // 数据集扫描不依赖 QFileSystemModel。立即排入事件循环，避免等待目录树加载完成后
-    // 才出现进度对话框。
-    QTimer::singleShot(0, this, [this, cleanDir] {
-        if (pendingDir_ == cleanDir)
-            startPendingImport();
-    });
+    // 后续完全由 QFileSystemModel::directoryLoaded 推进；不再同步扫描同一目录树。
     return true;
 }
 
@@ -1048,9 +1175,13 @@ void FileService::startPendingImport() {
     if (pendingDir_.isEmpty() || formatDetectionAttempted_)
         return;
 
+    QStringList imagePaths;
+    if (!collectLoadedImagePaths(pendingDir_, imagePaths))
+        return; // QFileSystemModel::directoryLoaded 会继续推进子目录加载。
+
     formatDetectionAttempted_ = true;
     const QString dir         = pendingDir_;
-    const bool succeeded      = tryImportPendingDataSet();
+    const bool succeeded      = tryImportPendingDataSet(imagePaths);
     formatDetectionFinished_  = true;
     if (!succeeded) {
         if (pendingDir_ == dir)
@@ -1061,17 +1192,12 @@ void FileService::startPendingImport() {
         tryOpenFirstAfterLoaded(dir);
 }
 
-bool FileService::tryImportPendingDataSet() {
+bool FileService::tryImportPendingDataSet(const QStringList& imagePaths) {
     if (conflictMode_ && QDir::cleanPath(pendingDir_) == QDir::cleanPath(stageImagesDir_)) {
-        QStringList stageImages;
-        QDirIterator iterator(stageImagesDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
-        while (iterator.hasNext())
-            stageImages.push_back(iterator.next());
-
         int alreadyV6Count = 0;
         int importedCount  = 0;
         int autoErrorCount = 0;
-        for (const QString& stageImage : stageImages) {
+        for (const QString& stageImage : imagePaths) {
             bool resolved  = false;
             bool converted = false;
             QString error;
@@ -1088,13 +1214,7 @@ bool FileService::tryImportPendingDataSet() {
                 ++alreadyV6Count;
         }
 
-        int count = 0;
-        QDirIterator remainingIterator(
-            stageImagesDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
-        while (remainingIterator.hasNext()) {
-            remainingIterator.next();
-            ++count;
-        }
+        const int count      = imagePaths.size() - alreadyV6Count - importedCount;
         pendingImageCount_ = count;
         currentDataSet     = DataSet::LabelMasterV6;
         controller::AppSettings::instance().setoutputFormat(
@@ -1141,24 +1261,28 @@ bool FileService::tryImportPendingDataSet() {
         progressDialog.close();
         refreshProgress();
     };
+    QElapsedTimer progressRefreshTimer;
+    progressRefreshTimer.start();
     const auto updateProgress = [&](const QString& text, int current, int total) {
+        const bool finished = total <= 0 || current >= total;
+        if (!finished && progressRefreshTimer.elapsed() < kProgressRefreshMs)
+            return;
         const int maximum = total > 0 ? total : 1;
         progressDialog.setRange(0, maximum);
         progressDialog.setValue(total > 0 ? std::clamp(current, 0, total) : maximum);
         progressDialog.setLabelText(tr("%1 %2/%3").arg(text).arg(current).arg(total));
         refreshProgress();
+        progressRefreshTimer.restart();
     };
 
     QVector<labelmaster::service::label_format::LabelFileSample> samples;
     QSet<QString> visitedLabels;
-    QDirIterator detectionIterator(pendingDir_, kImgExt, QDir::Files, QDirIterator::Subdirectories);
     QElapsedTimer scanRefreshTimer;
     scanRefreshTimer.start();
     int scannedImages = 0;
-    while (detectionIterator.hasNext()) {
-        const QString imagePath = detectionIterator.next();
+    for (const QString& imagePath : imagePaths) {
         ++scannedImages;
-        if (scannedImages == 1 || scanRefreshTimer.elapsed() >= 50) {
+        if (scanRefreshTimer.elapsed() >= kProgressRefreshMs) {
             progressDialog.setLabelText(tr("正在扫描图片 %1").arg(scannedImages));
             refreshProgress();
             scanRefreshTimer.restart();
@@ -1168,25 +1292,25 @@ bool FileService::tryImportPendingDataSet() {
         if (!QFile::exists(labelPath) || visitedLabels.contains(labelPath))
             continue;
         visitedLabels.insert(labelPath);
-
-        QImageReader reader(imagePath);
-        const QSize imageSize = reader.size();
-        if (imageSize.isEmpty()) {
-            closeProgress();
-            emit busy(false);
-            emit status(
-                tr("格式识别失败：无法读取图片尺寸 %1").arg(QFileInfo(imagePath).fileName()), 4000);
-            return false;
-        }
-        samples.push_back({labelPath, imageSize, imagePath});
+        samples.push_back({labelPath, imagePath});
     }
     pendingImageCount_ = scannedImages;
 
     const int sampleCount = static_cast<int>(samples.size());
     updateProgress(tr("正在验证数据集格式"), 0, sampleCount);
-    auto detection = labelmaster::service::label_format::detectDataSetFormat(
-        samples,
-        [&](int current, int total) { updateProgress(tr("正在验证数据集格式"), current, total); });
+    std::atomic<int> validatedLabels{0};
+    auto detection = runBackgroundWithProgress(
+        [&] {
+            return labelmaster::service::label_format::detectDataSetFormat(
+                samples, [&](int current, int) {
+                    validatedLabels.store(current, std::memory_order_relaxed);
+                });
+        },
+        [&] {
+            updateProgress(
+                tr("正在验证数据集格式"),
+                validatedLabels.load(std::memory_order_relaxed), sampleCount);
+        });
     if (detection.v1UpcChoiceRequired) {
         closeProgress();
         DataSet selectedFormat = DataSet::LabelMaster;
@@ -1232,7 +1356,6 @@ bool FileService::tryImportPendingDataSet() {
     const LabelOutputFormat targetFormat = canonicalOutputFormat(currentDataSet);
     struct PendingConversion {
         QString labelPath;
-        QSize imageSize;
         QVector<Armor> armors;
     };
     struct PendingConflict {
@@ -1242,45 +1365,62 @@ bool FileService::tryImportPendingDataSet() {
     QVector<PendingConversion> conversions;
     QVector<PendingConflict> conflicts;
 
-    // First parse every source file. A malformed label therefore cannot be replaced
-    // with an empty or partially converted file.
-    int parsedLabels = 0;
-    for (const auto& sample : samples) {
-        PendingConversion conversion{sample.path, sample.imageSize, {}};
-        QString error;
-        if (!labelmaster::service::label_format::readLabelFile(
-                sample.path, sample.imageSize, currentDataSet, conversion.armors, &error)) {
-            conflicts.push_back({sample, error});
-            LOGW(QString("标签将移入 stage：%1：%2").arg(sample.path, error));
+    // 检测阶段已经在归一化空间完成正式解析；这里直接消费缓存，不再打开 label。
+    for (const auto& parsedFile : detection.parsedFiles) {
+        const QVector<Armor>* cached = parsedFile.armorsFor(currentDataSet);
+        if (!parsedFile.hasAnnotations) {
+            conversions.push_back({parsedFile.sample.path, {}});
+        } else if (cached) {
+            conversions.push_back({parsedFile.sample.path, *cached});
         } else {
-            conversions.push_back(conversion);
+            const QString error = parsedFile.error.isEmpty()
+                ? tr("标签不符合已选择的 %1 格式")
+                      .arg(labelmaster::service::label_format::dataSetName(currentDataSet))
+                : parsedFile.error;
+            conflicts.push_back({parsedFile.sample, error});
+            LOGW(QString("标签将移入 stage：%1：%2").arg(parsedFile.sample.path, error));
         }
-        ++parsedLabels;
-        updateProgress(tr("正在转换数据集格式"), parsedLabels, sampleCount);
     }
 
     const int conversionCount = static_cast<int>(conversions.size());
-    int writtenLabels         = 0;
-    for (const PendingConversion& conversion : conversions) {
-        if (!directOpen) {
-            QString error;
-            if (!labelmaster::service::label_format::writeLabelFile(
-                    conversion.labelPath, conversion.imageSize, targetFormat, conversion.armors,
-                    &error)) {
-                closeProgress();
-                emit busy(false);
-                emit status(
-                    tr("导入写入失败：%1：%2")
-                        .arg(QFileInfo(conversion.labelPath).fileName(), error),
-                    5000);
-                LOGE(QString("导入写入失败：%1：%2").arg(conversion.labelPath, error));
-                return false;
-            }
+    if (!directOpen && !conversions.isEmpty()) {
+        std::vector<QString> conversionErrors(static_cast<size_t>(conversionCount));
+        std::atomic<int> writtenLabels{0};
+        {
+            DirectoryModelRefreshPause pause(fsModel_, proxy_);
+            runBackgroundWithProgress(
+                [&] {
+                    parallelForChunks(
+                        conversionCount, kBatchWorkerCount, kBatchChunkSize, [&](int index) {
+                            const PendingConversion& conversion = conversions[index];
+                            labelmaster::service::label_format::writeLabelFile(
+                                conversion.labelPath, QSize(1, 1), targetFormat,
+                                conversion.armors,
+                                &conversionErrors[static_cast<size_t>(index)]);
+                            writtenLabels.fetch_add(1, std::memory_order_relaxed);
+                        });
+                },
+                [&] {
+                    updateProgress(
+                        tr("正在写入转换结果"),
+                        writtenLabels.load(std::memory_order_relaxed), conversionCount);
+                });
         }
-        ++writtenLabels;
-        updateProgress(
-            directOpen ? tr("正在校验 LabelMaster V6") : tr("正在写入转换结果"), writtenLabels,
-            conversionCount);
+
+        for (int index = 0; index < conversionCount; ++index) {
+            const QString& error = conversionErrors[static_cast<size_t>(index)];
+            if (error.isEmpty())
+                continue;
+            const QString& path = conversions[index].labelPath;
+            closeProgress();
+            emit busy(false);
+            emit status(
+                tr("导入写入失败：%1：%2").arg(QFileInfo(path).fileName(), error), 5000);
+            LOGE(QString("导入写入失败：%1：%2").arg(path, error));
+            return false;
+        }
+    } else {
+        updateProgress(tr("正在校验 LabelMaster V6"), conversionCount, conversionCount);
     }
 
     if (!conflicts.isEmpty()) {
@@ -1290,20 +1430,112 @@ bool FileService::tryImportPendingDataSet() {
         stageImagesDir_ = QDir(stageRoot_).filePath(QStringLiteral("images"));
         stageLabelsDir_ = QDir(stageRoot_).filePath(QStringLiteral("labels"));
         loadStageManifest();
+        QDir().mkpath(stageImagesDir_);
+        QDir().mkpath(stageLabelsDir_);
 
-        int stagedCount = 0;
+        const int previousEntryCount = stageEntries_.size();
+        QVector<StageEntry> plannedEntries;
+        plannedEntries.reserve(conflicts.size());
         for (const PendingConflict& conflict : conflicts) {
-            QString operationError;
-            if (!stageInvalidSample(
-                    conflict.sample, currentDataSet, conflict.error, operationError)) {
+            if (conflict.sample.imagePath.isEmpty()) {
                 closeProgress();
                 emit busy(false);
-                emit status(tr("无法隔离冲突标签：%1").arg(operationError), 6000);
-                LOGE(QString("无法隔离冲突标签：%1").arg(operationError));
+                emit status(tr("无法隔离冲突标签：无法确定原始图片路径"), 6000);
                 return false;
             }
-            ++stagedCount;
-            updateProgress(tr("正在隔离冲突标签"), stagedCount, conflicts.size());
+            const QString relativeImage =
+                QDir(originalImageDir_).relativeFilePath(conflict.sample.imagePath);
+            StageEntry entry;
+            entry.stageImagePath =
+                QDir::cleanPath(QDir(stageImagesDir_).filePath(relativeImage));
+            entry.stageLabelPath    = stageLabelForImage(entry.stageImagePath);
+            entry.originalImagePath = conflict.sample.imagePath;
+            entry.originalLabelPath = conflict.sample.path;
+            entry.error             = conflict.error;
+            entry.sourceFormat      = currentDataSet;
+            plannedEntries.push_back(entry);
+            stageEntries_.push_back(entry); // 仅追加内存；整个批次只写一次 manifest。
+        }
+
+        struct ManifestResult {
+            bool succeeded = false;
+            QString error;
+        };
+        std::vector<QString> moveErrors(static_cast<size_t>(plannedEntries.size()));
+        std::vector<char> movedSuccessfully(static_cast<size_t>(plannedEntries.size()), 0);
+        std::atomic<int> stagedCount{0};
+        ManifestResult manifestResult;
+        {
+            DirectoryModelRefreshPause pause(fsModel_, proxy_);
+            auto manifestFuture = std::async(std::launch::async, [&] {
+                ManifestResult result;
+                result.succeeded = saveStageManifest(&result.error);
+                return result;
+            });
+            runBackgroundWithProgress(
+                [&] {
+                    parallelForChunks(
+                        plannedEntries.size(), kIsolationWorkerCount, kBatchChunkSize,
+                        [&](int index) {
+                            const StageEntry& entry = plannedEntries[index];
+                            QString& error = moveErrors[static_cast<size_t>(index)];
+                            if (!moveFileWithoutOverwrite(
+                                    entry.originalLabelPath, entry.stageLabelPath, error)) {
+                                stagedCount.fetch_add(1, std::memory_order_relaxed);
+                                return;
+                            }
+                            if (!moveFileWithoutOverwrite(
+                                    entry.originalImagePath, entry.stageImagePath, error)) {
+                                QString rollbackError;
+                                moveFileWithoutOverwrite(
+                                    entry.stageLabelPath, entry.originalLabelPath, rollbackError);
+                                stagedCount.fetch_add(1, std::memory_order_relaxed);
+                                return;
+                            }
+                            movedSuccessfully[static_cast<size_t>(index)] = 1;
+                            stagedCount.fetch_add(1, std::memory_order_relaxed);
+                        });
+                },
+                [&] {
+                    updateProgress(
+                        tr("正在隔离冲突标签"),
+                        stagedCount.load(std::memory_order_relaxed), plannedEntries.size());
+                });
+            manifestResult = manifestFuture.get();
+        }
+
+        QString operationError;
+        for (const QString& error : moveErrors) {
+            if (!error.isEmpty()) {
+                operationError = error;
+                break;
+            }
+        }
+        if (operationError.isEmpty() && !manifestResult.succeeded)
+            operationError = manifestResult.error;
+
+        if (!operationError.isEmpty()) {
+            // manifest 或移动失败时回滚本批次，并恢复批处理前的完整清单。
+            for (int index = 0; index < plannedEntries.size(); ++index) {
+                if (!movedSuccessfully[static_cast<size_t>(index)])
+                    continue;
+                const StageEntry& entry = plannedEntries[index];
+                QString rollbackError;
+                moveFileWithoutOverwrite(
+                    entry.stageImagePath, entry.originalImagePath, rollbackError);
+                moveFileWithoutOverwrite(
+                    entry.stageLabelPath, entry.originalLabelPath, rollbackError);
+                if (!rollbackError.isEmpty())
+                    operationError += tr("；回滚失败：%1").arg(rollbackError);
+            }
+            stageEntries_.resize(previousEntryCount);
+            QString restoreManifestError;
+            saveStageManifest(&restoreManifestError);
+            closeProgress();
+            emit busy(false);
+            emit status(tr("无法隔离冲突标签：%1").arg(operationError), 6000);
+            LOGE(QString("无法隔离冲突标签：%1").arg(operationError));
+            return false;
         }
 
         currentDataSet = DataSet::LabelMasterV6;
@@ -1317,7 +1549,7 @@ bool FileService::tryImportPendingDataSet() {
             (directOpen ? tr("已校验 %1 个 V6 标签；%2 个冲突样本进入 stage")
                         : tr("已转换 %1 个标签；%2 个冲突样本进入 stage"))
                 .arg(conversions.size())
-                .arg(stagedCount),
+                .arg(plannedEntries.size()),
             6000);
         openDir(stageImagesDir_);
         return false;
@@ -2158,17 +2390,14 @@ bool FileService::tryAutoResolveConflict(
         entry.sourceFormat = DataSet::Auto;
     }
 
-    QImageReader reader(stageImage);
-    const QSize imageSize = reader.size();
-    if (imageSize.isEmpty()) {
-        error = tr("无法读取 stage 图片尺寸");
+    const auto detection = labelmaster::service::label_format::detectDataSetFormat(
+        {{entry.stageLabelPath, stageImage}});
+    if (detection.parsedFiles.isEmpty()) {
+        error = detection.error;
         return false;
     }
-
-    QVector<Armor> armors;
-    QString validationError;
-    if (labelmaster::service::label_format::readLabelFile(
-            entry.stageLabelPath, imageSize, DataSet::LabelMasterV6, armors, &validationError)) {
+    const auto& parsedFile = detection.parsedFiles.front();
+    if (!parsedFile.hasAnnotations || parsedFile.armorsFor(DataSet::LabelMasterV6)) {
         if (!restoreConflict(stageImage, false, error))
             return false;
         resolved = true;
@@ -2178,20 +2407,11 @@ bool FileService::tryAutoResolveConflict(
     if (entry.sourceFormat == DataSet::Auto || entry.sourceFormat == DataSet::LabelMasterV6)
         return true;
 
-    armors.clear();
-    validationError.clear();
-    if (!labelmaster::service::label_format::readLabelFile(
-            entry.stageLabelPath, imageSize, entry.sourceFormat, armors, &validationError)) {
+    const QVector<Armor>* armors = parsedFile.armorsFor(entry.sourceFormat);
+    if (!armors)
         return true;
-    }
     if (!labelmaster::service::label_format::writeLabelFile(
-            entry.stageLabelPath, imageSize, LabelOutputFormat::LabelMasterV6, armors, &error)) {
-        return false;
-    }
-
-    QVector<Armor> verification;
-    if (!labelmaster::service::label_format::readLabelFile(
-            entry.stageLabelPath, imageSize, DataSet::LabelMasterV6, verification, &error)) {
+            entry.stageLabelPath, QSize(1, 1), LabelOutputFormat::LabelMasterV6, *armors, &error)) {
         return false;
     }
     if (!restoreConflict(stageImage, false, error))
@@ -2413,8 +2633,7 @@ void FileService::getStas(int colorId, int classId, int sizeId) {
         QString imgPath = fsModel_->filePath(fsModel_->index(i, 0, mapFromProxyToSource(parent)));
         const QString labelPath = labelFileForImage(imgPath);
         if (QFile::exists(labelPath)) {
-            QImageReader reader(imgPath);
-            const QVector<Armor> armors = readLabelFile(labelPath, reader.size(), currentDataSet);
+            const QVector<Armor> armors = readLabelFile(labelPath, QSize(1, 1), currentDataSet);
             for (const Armor& armor : armors) {
                 const int colId = IdConvert::colorLetter2Id(armor.color);
                 const int sId   = armor.size;

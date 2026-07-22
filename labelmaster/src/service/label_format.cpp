@@ -10,9 +10,13 @@
 #include <QTextStream>
 #include <QTransform>
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 namespace labelmaster::service::label_format {
 namespace {
@@ -23,6 +27,20 @@ struct BoundingBox {
     double width   = 0.0;
     double height  = 0.0;
 };
+
+struct PreparedLine {
+    int lineNumber = 0;
+    QStringList fields;
+};
+
+struct PreparedLabel {
+    QVector<PreparedLine> lines;
+    QString error;
+};
+
+constexpr QSize kNormalizedSpaceSize{1, 1};
+constexpr int kValidationWorkerCount = 8;
+constexpr int kValidationChunkSize   = 32;
 
 void setError(QString* destination, const QString& message) {
     if (destination)
@@ -464,6 +482,97 @@ bool parseLine(
     return false;
 }
 
+PreparedLabel readPreparedLabel(const QString& path) {
+    PreparedLabel prepared;
+    QFile file(path);
+    if (!file.exists())
+        return prepared;
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        prepared.error = QString("无法打开标签: %1").arg(path);
+        return prepared;
+    }
+
+    QTextStream stream(&file);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    stream.setEncoding(QStringConverter::Utf8);
+#else
+    stream.setCodec("UTF-8");
+#endif
+    int lineNumber = 0;
+    while (!stream.atEnd()) {
+        ++lineNumber;
+        QString line      = stream.readLine();
+        const int comment = line.indexOf('#');
+        if (comment >= 0)
+            line = line.left(comment);
+        line = line.simplified();
+        if (!line.isEmpty())
+            prepared.lines.push_back({lineNumber, line.split(' ')});
+    }
+    return prepared;
+}
+
+QVector<DataSet> candidateFormatsForFieldCount(int fieldCount) {
+    switch (fieldCount) {
+    case 19: return {DataSet::LabelMasterV6};
+    case 17: return {DataSet::LabelMasterV5};
+    case 15: return {DataSet::LabelMaster3};
+    case 13: return {DataSet::LabelMasterV4};
+    case 11: return {DataSet::LabelMaster2};
+    case 10: return {DataSet::LabelMaster, DataSet::HITSZ, DataSet::UPC};
+    case 9: return {DataSet::UnionSecret, DataSet::NWPU};
+    default: return {};
+    }
+}
+
+bool parsePreparedLabel(
+    const PreparedLabel& prepared, DataSet format, const QSize& imageSize,
+    QVector<Armor>& armors, QString* error) {
+    armors.clear();
+    if (!prepared.error.isEmpty()) {
+        setError(error, prepared.error);
+        return false;
+    }
+    for (const PreparedLine& line : prepared.lines) {
+        Armor armor;
+        QString lineError;
+        if (!parseLine(line.fields, imageSize, format, armor, lineError)) {
+            setError(
+                error, QString("第 %1 行格式错误: %2").arg(line.lineNumber).arg(lineError));
+            armors.clear();
+            return false;
+        }
+        armors.push_back(armor);
+    }
+    return true;
+}
+
+template <typename Function>
+void parallelForChunks(int count, int workerCount, int chunkSize, Function&& function) {
+    if (count <= 0)
+        return;
+    const int threadCount = std::min(workerCount, count);
+    const int effectiveChunkSize =
+        std::min(chunkSize, std::max(1, (count + threadCount - 1) / threadCount));
+    std::atomic<int> next{0};
+    std::vector<std::thread> workers;
+    workers.reserve(threadCount);
+    for (int worker = 0; worker < threadCount; ++worker) {
+        workers.emplace_back([&] {
+            while (true) {
+                const int begin = next.fetch_add(effectiveChunkSize, std::memory_order_relaxed);
+                if (begin >= count)
+                    return;
+                const int end = std::min(begin + effectiveChunkSize, count);
+                for (int index = begin; index < end; ++index)
+                    function(index);
+            }
+        });
+    }
+    for (std::thread& worker : workers)
+        worker.join();
+}
+
 BoundingBox projectedBoundingBox(const Armor& armor, const QSize& imageSize) {
     const auto& svgTemplate = armor.size == 0 ? labelmaster::util::SvgConstants::smallArmor()
                                               : labelmaster::util::SvgConstants::bigArmor();
@@ -514,34 +623,15 @@ void writePoint(QTextStream& stream, const QPointF& point) {
     stream << point.x() << ' ' << point.y();
 }
 
-bool labelHasDataLines(const QString& path, bool& hasData, QString& error) {
-    hasData = false;
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        error = QString("无法读取标签: %1").arg(path);
-        return false;
-    }
-
-    QTextStream stream(&file);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    stream.setEncoding(QStringConverter::Utf8);
-#else
-    stream.setCodec("UTF-8");
-#endif
-    while (!stream.atEnd()) {
-        QString line      = stream.readLine();
-        const int comment = line.indexOf('#');
-        if (comment >= 0)
-            line = line.left(comment);
-        if (!line.trimmed().isEmpty()) {
-            hasData = true;
-            return true;
-        }
-    }
-    return true;
-}
-
 } // namespace
+
+const QVector<Armor>* ParsedLabelFile::armorsFor(DataSet format) const {
+    for (const ParsedLabelCandidate& candidate : candidates) {
+        if (candidate.format == format)
+            return &candidate.armors;
+    }
+    return nullptr;
+}
 
 QString outputFormatName(LabelOutputFormat format) {
     switch (format) {
@@ -581,49 +671,75 @@ FormatDetectionResult detectDataSetFormat(
         DataSet::NWPU,
     };
     QVector<int> candidateSupport(allFormats.size(), 0);
-    const int total              = static_cast<int>(samples.size());
-    int processed                = 0;
-    int candidateSampleCount     = 0;
-    const auto reportProgress = [&] {
-        ++processed;
-        if (progress)
-            progress(processed, total);
-    };
-    for (const LabelFileSample& sample : samples) {
-        bool hasData = false;
-        QString readError;
-        if (!labelHasDataLines(sample.path, hasData, readError)) {
-            result.error = readError;
-            return result;
-        }
-        if (!hasData) {
-            reportProgress();
-            continue;
-        }
-        result.hasAnnotations = true;
+    const int total          = static_cast<int>(samples.size());
+    int candidateSampleCount = 0;
+    std::vector<ParsedLabelFile> parsedFiles(static_cast<size_t>(total));
+    std::mutex progressMutex;
+    int processed = 0;
 
-        QVector<DataSet> fileCandidates;
-        for (DataSet format : allFormats) {
-            QVector<Armor> parsed;
-            if (readLabelFile(sample.path, sample.imageSize, format, parsed, nullptr)) {
-                fileCandidates.push_back(format);
+    // 每个 label 仅在这里打开一次。字段数先把候选缩到 1～3 个，再在 1x1
+    // 归一化空间解析；成功结果直接成为后续转换缓存。
+    parallelForChunks(total, kValidationWorkerCount, kValidationChunkSize, [&](int index) {
+        ParsedLabelFile parsedFile;
+        parsedFile.sample = samples[index];
+        const PreparedLabel prepared = readPreparedLabel(parsedFile.sample.path);
+        if (!prepared.error.isEmpty()) {
+            parsedFile.error = prepared.error;
+        } else if (!prepared.lines.isEmpty()) {
+            parsedFile.hasAnnotations = true;
+            const int fieldCount = prepared.lines.front().fields.size();
+            const QVector<DataSet> possible = candidateFormatsForFieldCount(fieldCount);
+            if (possible.isEmpty()) {
+                parsedFile.error = QString("不支持的字段数: %1").arg(fieldCount);
+            } else {
+                QString firstError;
+                for (DataSet format : possible) {
+                    QVector<Armor> armors;
+                    QString parseError;
+                    if (parsePreparedLabel(
+                            prepared, format, kNormalizedSpaceSize, armors, &parseError)) {
+                        parsedFile.candidates.push_back({format, std::move(armors)});
+                    } else if (firstError.isEmpty()) {
+                        firstError = parseError;
+                    }
+                }
+                if (parsedFile.candidates.isEmpty())
+                    parsedFile.error = firstError;
             }
         }
+        parsedFiles[static_cast<size_t>(index)] = std::move(parsedFile);
 
-        if (fileCandidates.isEmpty()) {
+        if (progress) {
+            std::lock_guard lock(progressMutex);
+            progress(++processed, total);
+        }
+    });
+
+    result.parsedFiles.reserve(total);
+    for (ParsedLabelFile& parsedFile : parsedFiles) {
+        result.parsedFiles.push_back(std::move(parsedFile));
+        const ParsedLabelFile& cached = result.parsedFiles.back();
+        if (!cached.error.isEmpty() && !cached.hasAnnotations) {
+            result.error = cached.error;
+            return result;
+        }
+        if (!cached.hasAnnotations)
+            continue;
+        result.hasAnnotations = true;
+
+        if (cached.candidates.isEmpty()) {
+            const QString detail = cached.error.isEmpty() ? QString() : QString(": %1").arg(cached.error);
             result.invalidSamples.push_back(
-                {sample,
-                 QString("%1 不符合任何已支持的标签格式")
-                     .arg(QFileInfo(sample.path).fileName())});
-            reportProgress();
+                {cached.sample,
+                 QString("%1 不符合任何已支持的标签格式%2")
+                     .arg(QFileInfo(cached.sample.path).fileName(), detail)});
             continue;
         }
         ++candidateSampleCount;
         for (int index = 0; index < allFormats.size(); ++index) {
-            if (fileCandidates.contains(allFormats[index]))
+            if (cached.armorsFor(allFormats[index]))
                 ++candidateSupport[index];
         }
-        reportProgress();
     }
 
     if (!result.hasAnnotations) {
@@ -675,42 +791,7 @@ FormatDetectionResult detectDataSetFormat(
 bool readLabelFile(
     const QString& path, const QSize& imageSize, DataSet format, QVector<Armor>& armors,
     QString* error) {
-    armors.clear();
-    QFile file(path);
-    if (!file.exists())
-        return true;
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        setError(error, QString("无法打开标签: %1").arg(path));
-        return false;
-    }
-
-    QTextStream stream(&file);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    stream.setEncoding(QStringConverter::Utf8);
-#else
-    stream.setCodec("UTF-8");
-#endif
-    int lineNumber = 0;
-    while (!stream.atEnd()) {
-        ++lineNumber;
-        QString line      = stream.readLine();
-        const int comment = line.indexOf('#');
-        if (comment >= 0)
-            line = line.left(comment);
-        line = line.simplified();
-        if (line.isEmpty())
-            continue;
-
-        Armor armor;
-        QString lineError;
-        if (!parseLine(line.split(' '), imageSize, format, armor, lineError)) {
-            setError(error, QString("第 %1 行格式错误: %2").arg(lineNumber).arg(lineError));
-            armors.clear();
-            return false;
-        }
-        armors.push_back(armor);
-    }
-    return true;
+    return parsePreparedLabel(readPreparedLabel(path), format, imageSize, armors, error);
 }
 
 bool readLabelFileLenient(
