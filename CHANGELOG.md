@@ -4,6 +4,9 @@ All notable changes to ATLabelMaster will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Prompt to review and optionally delete label files that have no matching image after dataset validation and conversion finish.
+
 ### Fixed
 - Show dataset scanning progress immediately instead of waiting for the filesystem model, keep the UI responsive, and reuse the initial scan during conversion.
 - Corrected V4 to its 36-class encoding and V5 to its fixed 14-class encoding.

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(LabelMaster LANGUAGES CXX)
+project(LabelMaster VERSION 1.2.2 LANGUAGES CXX)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/labelmaster/src)
@@ -29,6 +29,11 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Core Gui Svg)
 find_package(Threads REQUIRED)
 
 add_executable(${PROJECT_NAME} ${SRC_FILES})
+
+set(LABELMASTER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "ATLabelMaster application version")
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    LABELMASTER_VERSION="${LABELMASTER_APP_VERSION}"
+)
 
 target_include_directories(${PROJECT_NAME} PRIVATE 
     ${SRC_PATH}

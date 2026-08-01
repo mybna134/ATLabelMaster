@@ -16,10 +16,15 @@
 #include <qobject.h>
 #include <qtmetamacros.h>
 
+#ifndef LABELMASTER_VERSION
+#define LABELMASTER_VERSION "1.2.2"
+#endif
+
 int main(int argc, char* argv[]) {
     // 1) 初始化应用配置系统(在 QApplication 之前，否则会Unknown Organization)
     // 2) 安装 Qt 的全局消息处理器，尽早捕获日志
     QApplication app(argc, argv);
+    QCoreApplication::setApplicationVersion(QStringLiteral(LABELMASTER_VERSION));
     controller::AppSettings::initOrgApp("LabelMaster", "LabelMaster", "LabelMaster.org");
 #ifdef Q_OS_MAC
     // 在 Mac 上，从 MacOS 目录往上退一级，再进入 Resources

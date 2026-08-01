@@ -1,22 +1,34 @@
 #include "mainwindow.hpp"
+#include "controller/settings.hpp"
 #include "logger/core.hpp"
 #include "ui/image_canvas.hpp"
 #include "ui/settings_dialog.hpp"
 #include "ui/stas_dialog.h"
 #include <QAction>
 #include <QApplication>
+#include <QCoreApplication>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QDir>
 #include <QEvent>
+#include <QFile>
 #include <QHeaderView>
+#include <QHBoxLayout>
+#include <QIcon>
 #include <QImage>
 #include <QItemSelectionModel>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMimeData>
 #include <QPixmap>
+#include <QStyle>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QTextEdit>
 #include <QTreeView>
 #include <QUrl>
+#include <QVBoxLayout>
 #include <qaction.h>
 #include <qkeysequence.h>
 #include <qmenu.h>
@@ -25,11 +37,87 @@
 
 using ui::MainWindow;
 
+#ifndef LABELMASTER_VERSION
+#define LABELMASTER_VERSION "1.2.2"
+#endif
+
+namespace {
+
+struct ShortcutRow {
+    QString scope;
+    QString action;
+    QString shortcut;
+};
+
+QString displayActionText(const QAction* action) {
+    if (!action)
+        return {};
+    QString text = action->text();
+    text.remove(QLatin1Char('&'));
+    return text;
+}
+
+QString displayShortcut(const QAction* action, const QString& emptyText) {
+    if (!action)
+        return emptyText;
+
+    const QString text = action->shortcut().toString(QKeySequence::NativeText);
+    return text.isEmpty() ? emptyText : text;
+}
+
+QString applicationVersionText() {
+    const QString version = QCoreApplication::applicationVersion();
+    return version.isEmpty() ? QStringLiteral(LABELMASTER_VERSION) : version;
+}
+
+QString findApplicationIconPath() {
+    const QStringList candidates{
+        controller::AppSettings::instance().assetsDir() + QStringLiteral("/icons/1.svg"),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/assets/icons/1.svg"),
+        QCoreApplication::applicationDirPath() + QStringLiteral("/../assets/icons/1.svg"),
+        QDir::currentPath() + QStringLiteral("/assets/icons/1.svg"),
+        QStringLiteral("/usr/share/labelmaster/icons/1.svg"),
+        QStringLiteral("/usr/local/share/labelmaster/icons/1.svg"),
+        QStringLiteral("/usr/share/icons/hicolor/scalable/apps/labelmaster.svg"),
+        QStringLiteral("/usr/local/share/icons/hicolor/scalable/apps/labelmaster.svg"),
+    };
+
+    for (const QString& path : candidates) {
+        if (QFile::exists(path))
+            return path;
+    }
+    return {};
+}
+
+QIcon applicationIcon(QWidget* widget) {
+    QIcon icon = QIcon::fromTheme(QStringLiteral("labelmaster"));
+    if (!icon.isNull())
+        return icon;
+
+    const QString path = findApplicationIconPath();
+    if (!path.isEmpty()) {
+        icon = QIcon(path);
+        if (!icon.isNull())
+            return icon;
+    }
+
+    return widget ? widget->style()->standardIcon(QStyle::SP_ComputerIcon) : QIcon{};
+}
+
+void addShortcutRow(QTableWidget* table, int row, const ShortcutRow& shortcut) {
+    table->setItem(row, 0, new QTableWidgetItem(shortcut.scope));
+    table->setItem(row, 1, new QTableWidgetItem(shortcut.action));
+    table->setItem(row, 2, new QTableWidgetItem(shortcut.shortcut));
+}
+
+} // namespace
+
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , ui_(std::make_unique<::Ui::MainWindow>()) {
     ui_->setupUi(this);
     setWindowTitle(QStringLiteral("ATLabelMaster"));
+    setWindowIcon(applicationIcon(this));
     logger::Logger::instance().attachTextEdit(ui_->log_text);
 
     if (auto* log = ui_->log_text)
@@ -86,6 +174,102 @@ void MainWindow::showStasDialog() {
     connect(this, &ui::MainWindow::sigStasUpdateRequested, dialog, &ui::StasDialog::updateStasData);
     dialog->show();
 }
+
+void MainWindow::showHelpDialog() {
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("帮助"));
+    dialog.setWindowIcon(applicationIcon(this));
+    dialog.resize(720, 520);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* title  = new QLabel(tr("当前快捷键设置"), &dialog);
+    auto* table  = new QTableWidget(&dialog);
+
+    const QString globalScope = tr("全局");
+    const QString canvasScope = tr("画布");
+    const QString empty       = tr("未设置");
+    const QList<ShortcutRow> shortcuts{
+        {globalScope, displayActionText(ui_->actionOpen), displayShortcut(ui_->actionOpen, empty)},
+        {globalScope, displayActionText(ui_->actionSave), displayShortcut(ui_->actionSave, empty)},
+        {globalScope, displayActionText(ui_->actionDelete), displayShortcut(ui_->actionDelete, empty)},
+        {globalScope, displayActionText(ui_->actionPrev), displayShortcut(ui_->actionPrev, empty)},
+        {globalScope, displayActionText(ui_->actionNext), displayShortcut(ui_->actionNext, empty)},
+        {globalScope, displayActionText(ui_->actionHistEq), displayShortcut(ui_->actionHistEq, empty)},
+        {globalScope, displayActionText(ui_->actionSmart), displayShortcut(ui_->actionSmart, empty)},
+        {globalScope, displayActionText(ui_->actionSettings), displayShortcut(ui_->actionSettings, empty)},
+        {globalScope, displayActionText(ui_->actionStas), displayShortcut(ui_->actionStas, empty)},
+        {globalScope, displayActionText(ui_->actionFilter), displayShortcut(ui_->actionFilter, empty)},
+        {globalScope, displayActionText(ui_->actionHelp), displayShortcut(ui_->actionHelp, empty)},
+        {globalScope, displayActionText(ui_->actionAbout), displayShortcut(ui_->actionAbout, empty)},
+        {canvasScope, tr("选择 Detector"), tr("W / A / S / D")},
+        {canvasScope, tr("编辑选中 Detector"), tr("F2 / C / 双击")},
+        {canvasScope, tr("设置颜色：Red / Gray / Blue / Purple"), tr("R / G / B / P")},
+        {canvasScope, tr("设置类别：1-5 / Outpost / Base"), tr("1 / 2 / 3 / 4 / 5 / O / L")},
+        {canvasScope, tr("设置大小：Big / Small"), tr("+ / -")},
+        {canvasScope, tr("设置关键点可见性：左上 / 右上 / 左下 / 右下"), tr("J / K / N / M")},
+        {canvasScope, tr("取消当前画布操作"), tr("Esc")},
+    };
+
+    table->setColumnCount(3);
+    table->setRowCount(shortcuts.size());
+    table->setHorizontalHeaderLabels({tr("范围"), tr("操作"), tr("快捷键")});
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionMode(QAbstractItemView::NoSelection);
+    table->setAlternatingRowColors(true);
+    table->verticalHeader()->setVisible(false);
+    table->horizontalHeader()->setStretchLastSection(true);
+    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+
+    for (int row = 0; row < shortcuts.size(); ++row)
+        addShortcutRow(table, row, shortcuts.at(row));
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    layout->addWidget(title);
+    layout->addWidget(table);
+    layout->addWidget(buttons);
+    dialog.exec();
+}
+
+void MainWindow::showAboutDialog() {
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("关于"));
+    dialog.setWindowIcon(applicationIcon(this));
+    dialog.resize(420, 220);
+
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* top    = new QHBoxLayout;
+
+    auto* iconLabel = new QLabel(&dialog);
+    iconLabel->setFixedSize(88, 88);
+    iconLabel->setAlignment(Qt::AlignCenter);
+
+    const QPixmap pixmap = applicationIcon(this).pixmap(72, 72);
+    if (!pixmap.isNull())
+        iconLabel->setPixmap(pixmap);
+
+    auto* textLabel = new QLabel(&dialog);
+    textLabel->setTextFormat(Qt::RichText);
+    textLabel->setText(
+        QStringLiteral("<b>ATLabelMaster</b><br>") + tr("版本：%1").arg(applicationVersionText())
+        + QStringLiteral("<br>") + tr("Qt 版本：%1").arg(QString::fromLatin1(qVersion()))
+        + QStringLiteral("<br>") + tr("RoboMaster 装甲板标注工具"));
+    textLabel->setWordWrap(true);
+
+    top->addWidget(iconLabel);
+    top->addWidget(textLabel, 1);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    layout->addLayout(top);
+    layout->addWidget(buttons);
+    dialog.exec();
+}
+
 void MainWindow::showImage(const QImage& img) {
     ui_->label->setImage(img);
     ui_->label->setAlignment(Qt::AlignCenter);
@@ -299,6 +483,8 @@ void MainWindow::setupActions() {
     ensureAction(ui_->actionSettings, {}, tr("Settings"));
     ensureAction(ui_->actionStas, QKeySequence(Qt::Key_F1), tr("Get STAS."));
     ensureAction(ui_->actionFilter, {}, tr("按 Label 类型筛选图片"));
+    ensureAction(ui_->actionHelp, {}, tr("查看当前快捷键设置"));
+    ensureAction(ui_->actionAbout, {}, tr("查看当前版本信息"));
 
     connect(ui_->actionOpen, &QAction::triggered, this, &MainWindow::sigOpenFolderRequested);
     connect(ui_->actionSave, &QAction::triggered, this, &MainWindow::sigSaveRequested);
@@ -310,6 +496,8 @@ void MainWindow::setupActions() {
     connect(ui_->actionStas, &QAction::triggered, this, &MainWindow::showStasDialog);
     connect(ui_->actionSettings, &QAction::triggered, this, &MainWindow::sigSettingsRequested);
     connect(ui_->actionFilter, &QAction::triggered, this, &MainWindow::sigFilterRequested);
+    connect(ui_->actionHelp, &QAction::triggered, this, &MainWindow::showHelpDialog);
+    connect(ui_->actionAbout, &QAction::triggered, this, &MainWindow::showAboutDialog);
 }
 
 void MainWindow::wireButtonsToActions() {

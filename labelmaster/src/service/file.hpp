@@ -76,6 +76,7 @@ private:
     bool openFileAt(const QModelIndex& proxyIndex);
     void startPendingImport();
     bool tryImportPendingDataSet(const QStringList& imagePaths);
+    void offerToRemoveUnusedLabels(const QStringList& imagePaths);
     bool collectLoadedImagePaths(const QString& dir, QStringList& imagePaths);
     void tryOpenFirstAfterLoaded(const QString& dir);
     QModelIndex findFirstImageUnder(const QModelIndex& proxyRoot) const;

@@ -20,7 +20,7 @@
     },
     {
       // 记得修改这里
-      "source": "${localEnv:HOME}/dataset",
+      "source": "${localEnv:HOME}/datasets1",
       "target": "/home/developer/dataset",
       "type": "bind",
     },

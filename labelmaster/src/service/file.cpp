@@ -307,6 +307,62 @@ QString imageDirectoryFromParent(const QString& parentPath) {
     return firstExisting.isEmpty() ? QDir::cleanPath(parentPath) : firstExisting;
 }
 
+struct LabelPathResolution {
+    QStringList candidates;
+    QString fallback;
+};
+
+LabelPathResolution labelPathResolutionForImage(const QString& imagePath) {
+    const QFileInfo imageInfo(imagePath);
+    const QString configuredDir = controller::AppSettings::instance().saveDir().trimmed();
+    const QDir imageDir(imageInfo.absolutePath());
+    const QDir imageParent(QDir::cleanPath(imageDir.filePath(QStringLiteral(".."))));
+    const QString labelFileName = imageInfo.completeBaseName() + QStringLiteral(".txt");
+
+    const auto labelPathIn = [&](const QString& dirPath) {
+        return QDir::cleanPath(QDir(dirPath).absoluteFilePath(labelFileName));
+    };
+    const auto pathsForDefaultDir = [&](const QString& name) {
+        return QStringList{
+            labelPathIn(imageParent.filePath(name)),
+            labelPathIn(imageDir.filePath(name)),
+        };
+    };
+
+    LabelPathResolution resolution;
+    if (configuredDir.isEmpty() || configuredDir == QStringLiteral("label")
+        || configuredDir == QStringLiteral("labels")) {
+        if (configuredDir == QStringLiteral("labels")) {
+            resolution.candidates << pathsForDefaultDir(QStringLiteral("labels"))
+                                  << pathsForDefaultDir(QStringLiteral("label"));
+            resolution.fallback = labelPathIn(imageParent.filePath(QStringLiteral("labels")));
+        } else if (configuredDir == QStringLiteral("label")) {
+            resolution.candidates << pathsForDefaultDir(QStringLiteral("label"))
+                                  << pathsForDefaultDir(QStringLiteral("labels"));
+            resolution.fallback = labelPathIn(imageParent.filePath(QStringLiteral("label")));
+        } else {
+            resolution.candidates << pathsForDefaultDir(QStringLiteral("labels"))
+                                  << pathsForDefaultDir(QStringLiteral("label"));
+            resolution.fallback = labelPathIn(imageParent.filePath(QStringLiteral("label")));
+        }
+        return resolution;
+    }
+
+    const QDir labelDir(configuredDir);
+    if (labelDir.isAbsolute()) {
+        resolution.fallback = labelPathIn(labelDir.absolutePath());
+        resolution.candidates.push_back(resolution.fallback);
+        return resolution;
+    }
+
+    resolution.candidates = {
+        labelPathIn(imageParent.filePath(configuredDir)),
+        labelPathIn(imageDir.filePath(configuredDir)),
+    };
+    resolution.fallback = resolution.candidates.front();
+    return resolution;
+}
+
 QString formatHelpHtml() {
     return QStringLiteral(
         "<h2>支持的标签格式</h2>"
@@ -1190,6 +1246,85 @@ void FileService::startPendingImport() {
     }
     if (pendingDir_ == dir)
         tryOpenFirstAfterLoaded(dir);
+    if (!conflictMode_)
+        offerToRemoveUnusedLabels(imagePaths);
+}
+
+void FileService::offerToRemoveUnusedLabels(const QStringList& imagePaths) {
+    QSet<QString> usedLabelPaths;
+    QSet<QString> labelDirectories;
+    for (const QString& imagePath : imagePaths) {
+        usedLabelPaths.insert(QDir::cleanPath(labelFileForImage(imagePath)));
+        const LabelPathResolution resolution = labelPathResolutionForImage(imagePath);
+        for (const QString& candidate : resolution.candidates) {
+            const QString directory = QDir::cleanPath(QFileInfo(candidate).absolutePath());
+            if (QFileInfo(directory).isDir())
+                labelDirectories.insert(directory);
+        }
+    }
+
+    QStringList unusedLabels;
+    for (const QString& directory : labelDirectories) {
+        const QFileInfoList entries = QDir(directory).entryInfoList(
+            QDir::Files | QDir::Hidden | QDir::System | QDir::NoDotAndDotDot,
+            QDir::Name | QDir::IgnoreCase);
+        for (const QFileInfo& entry : entries) {
+            if (entry.suffix().compare(QStringLiteral("txt"), Qt::CaseInsensitive) != 0)
+                continue;
+            const QString labelPath = QDir::cleanPath(entry.absoluteFilePath());
+            if (!usedLabelPaths.contains(labelPath))
+                unusedLabels.push_back(labelPath);
+        }
+    }
+    unusedLabels.removeDuplicates();
+    unusedLabels.sort(Qt::CaseInsensitive);
+    if (unusedLabels.isEmpty())
+        return;
+
+    constexpr int kDetailedPathLimit = 200;
+    QStringList displayedPaths       = unusedLabels.mid(0, kDetailedPathLimit);
+    if (unusedLabels.size() > kDetailedPathLimit) {
+        displayedPaths.push_back(
+            tr("……另有 %1 个文件未显示").arg(unusedLabels.size() - kDetailedPathLimit));
+    }
+
+    QMessageBox box(QApplication::activeWindow());
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("发现多余标签"));
+    box.setText(tr("发现 %1 个当前图片目录用不到的标签文件。").arg(unusedLabels.size()));
+    box.setInformativeText(tr("这些文件没有可匹配的图片。是否将它们删除？删除后无法恢复。"));
+    box.setDetailedText(displayedPaths.join('\n'));
+    auto* deleteButton = box.addButton(tr("删除多余标签"), QMessageBox::DestructiveRole);
+    auto* keepButton   = box.addButton(tr("保留"), QMessageBox::RejectRole);
+    box.setDefaultButton(keepButton);
+    box.exec();
+    if (box.clickedButton() != deleteButton)
+        return;
+
+    QStringList failedPaths;
+    int removedCount = 0;
+    for (const QString& labelPath : unusedLabels) {
+        if (QFile::remove(labelPath))
+            ++removedCount;
+        else
+            failedPaths.push_back(labelPath);
+    }
+
+    if (failedPaths.isEmpty()) {
+        emit status(tr("已删除 %1 个多余标签").arg(removedCount), 4000);
+        return;
+    }
+
+    QMessageBox failureBox(QApplication::activeWindow());
+    failureBox.setIcon(QMessageBox::Warning);
+    failureBox.setWindowTitle(tr("部分标签删除失败"));
+    failureBox.setText(
+        tr("已删除 %1 个标签，另有 %2 个标签删除失败。").arg(removedCount).arg(failedPaths.size()));
+    failureBox.setInformativeText(tr("请检查文件权限或文件是否仍然存在。"));
+    failureBox.setDetailedText(failedPaths.join('\n'));
+    failureBox.exec();
+    emit status(
+        tr("已删除 %1 个多余标签，%2 个删除失败").arg(removedCount).arg(failedPaths.size()), 5000);
 }
 
 bool FileService::tryImportPendingDataSet(const QStringList& imagePaths) {
@@ -1912,69 +2047,16 @@ void FileService::tryRestoreLastVisited() {
 
 // ---------- 标注 I/O（归一化格式 + 兼容旧像素格式） ----------
 QString FileService::labelFileForImage(const QString& imagePath) {
-    QFileInfo fi(imagePath);
-    const QString configuredDir = controller::AppSettings::instance().saveDir().trimmed();
-    const QDir imageDir(fi.absolutePath());
-    const QDir imageParent(QDir::cleanPath(imageDir.filePath(QStringLiteral(".."))));
-    const QString labelFileName = fi.completeBaseName() + QStringLiteral(".txt");
-
-    auto defaultDirs = [&](const QString& name) {
-        return QStringList{
-            QDir::cleanPath(imageParent.filePath(name)),
-            QDir::cleanPath(imageDir.filePath(name)),
-        };
-    };
-    auto labelPathIn = [&](const QString& dirPath) {
-        return QDir::cleanPath(QDir(dirPath).absoluteFilePath(labelFileName));
-    };
-
-    if (configuredDir.isEmpty() || configuredDir == QStringLiteral("label")
-        || configuredDir == QStringLiteral("labels")) {
-        QStringList candidateDirs;
-        if (configuredDir == QStringLiteral("labels")) {
-            candidateDirs << defaultDirs(QStringLiteral("labels"))
-                          << defaultDirs(QStringLiteral("label"));
-        } else if (configuredDir == QStringLiteral("label")) {
-            candidateDirs << defaultDirs(QStringLiteral("label"))
-                          << defaultDirs(QStringLiteral("labels"));
-        } else {
-            candidateDirs << defaultDirs(QStringLiteral("labels"))
-                          << defaultDirs(QStringLiteral("label"));
-        }
-
-        for (const QString& dirPath : candidateDirs) {
-            const QString candidate = labelPathIn(dirPath);
-            if (QFile::exists(candidate))
-                return candidate;
-        }
-        for (const QString& dirPath : candidateDirs) {
-            if (QFileInfo(dirPath).isDir())
-                return labelPathIn(dirPath);
-        }
-
-        const QString fallbackName = configuredDir == QStringLiteral("labels")
-                                       ? QStringLiteral("labels")
-                                       : QStringLiteral("label");
-        return labelPathIn(imageParent.filePath(fallbackName));
+    const LabelPathResolution resolution = labelPathResolutionForImage(imagePath);
+    for (const QString& candidate : resolution.candidates) {
+        if (QFile::exists(candidate))
+            return candidate;
     }
-
-    QDir labelDir(configuredDir);
-    if (labelDir.isAbsolute())
-        return labelPathIn(labelDir.absolutePath());
-
-    const QString parentCandidate   = QDir::cleanPath(imageParent.filePath(configuredDir));
-    const QString imageDirCandidate = QDir::cleanPath(imageDir.filePath(configuredDir));
-    const QString parentLabelPath   = labelPathIn(parentCandidate);
-    const QString imageDirLabelPath = labelPathIn(imageDirCandidate);
-    if (QFile::exists(parentLabelPath))
-        return parentLabelPath;
-    if (QFile::exists(imageDirLabelPath))
-        return imageDirLabelPath;
-    if (QFileInfo(parentCandidate).isDir())
-        return parentLabelPath;
-    if (QFileInfo(imageDirCandidate).isDir())
-        return imageDirLabelPath;
-    return parentLabelPath;
+    for (const QString& candidate : resolution.candidates) {
+        if (QFileInfo(candidate).dir().exists())
+            return candidate;
+    }
+    return resolution.fallback;
 }
 
 bool FileService::writeLabelFile(
