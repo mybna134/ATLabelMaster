@@ -4,8 +4,8 @@ on:
   push:
   workflow_dispatch:
     inputs:
-      rebuild_devcontainer:
-        description: Rebuild and publish the devcontainer image even if the Dockerfile tag already exists
+      rebuild_build_image:
+        description: Rebuild and publish the Docker build image even if the Dockerfile tag already exists
         required: false
         default: false
         type: boolean
@@ -21,16 +21,16 @@ permissions:
 
 env:
   APP_ID: io.github.mybna134.ATLabelMaster
-  DEVCONTAINER_IMAGE: labelmaster:latest
-  DEVCONTAINER_PACKAGE_NAME: atlabelmaster-devcontainer
+  BUILD_IMAGE: labelmaster:latest
+  BUILD_IMAGE_PACKAGE_NAME: atlabelmaster-devcontainer
   DIST_DIR: dist
   FLATPAK_RUNTIME: org.kde.Platform
   FLATPAK_SDK: org.kde.Sdk
   FLATPAK_RUNTIME_VERSION: "6.10"
 
 jobs:
-  devcontainer-image:
-    name: Publish devcontainer image
+  build_image:
+    name: Publish Docker build image
     runs-on: ubuntu-24.04
     outputs:
       image_ref: ${{ steps.image-meta.outputs.image_ref }}
@@ -47,14 +47,14 @@ jobs:
           set -euo pipefail
           printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
-      - name: Resolve devcontainer image tag
+      - name: Resolve Docker build image tag
         id: image-meta
         shell: bash
         run: |
           set -euo pipefail
 
           owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          image="ghcr.io/${owner}/${DEVCONTAINER_PACKAGE_NAME}"
+          image="ghcr.io/${owner}/${BUILD_IMAGE_PACKAGE_NAME}"
           dockerfile_hash="$(sha256sum Dockerfile | cut -d ' ' -f 1)"
           image_ref="${image}:dockerfile-${dockerfile_hash}"
 
@@ -64,9 +64,9 @@ jobs:
             echo "latest_ref=${image}:latest"
           } >> "$GITHUB_OUTPUT"
 
-          printf 'Devcontainer image: %s\n' "$image_ref"
+          printf 'Docker build image: %s\n' "$image_ref"
 
-      - name: Check published devcontainer image
+      - name: Check published Docker build image
         id: published-image
         shell: bash
         run: |
@@ -74,14 +74,14 @@ jobs:
 
           if docker manifest inspect "${{ steps.image-meta.outputs.image_ref }}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Reusing existing devcontainer image."
+            echo "Reusing existing Docker build image."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "Devcontainer image is missing and will be published."
+            echo "Docker build image is missing and will be published."
           fi
 
-      - name: Build and publish devcontainer image
-        if: steps.published-image.outputs.exists != 'true' || inputs.rebuild_devcontainer
+      - name: Build and publish Docker build image
+        if: steps.published-image.outputs.exists != 'true' || inputs.rebuild_build_image
         shell: bash
         env:
           IMAGE_REF: ${{ steps.image-meta.outputs.image_ref }}
@@ -92,7 +92,7 @@ jobs:
           docker build --pull \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            --label "org.opencontainers.image.description=ATLabelMaster devcontainer" \
+            --label "org.opencontainers.image.description=ATLabelMaster Docker build image" \
             -t "${IMAGE_REF}" \
             -t "${LATEST_REF}" \
             -f Dockerfile .
@@ -102,7 +102,7 @@ jobs:
   linux-x86_64:
     name: Linux x86_64 deb and Flatpak
     runs-on: ubuntu-24.04
-    needs: devcontainer-image
+    needs: build_image
 
     steps:
       - name: Checkout
@@ -115,9 +115,6 @@ jobs:
           cat /etc/os-release
           uname -a
 
-      - name: Install devcontainer CLI
-        run: npm install -g @devcontainers/cli
-
       - name: Log in to GHCR
         shell: bash
         env:
@@ -126,17 +123,11 @@ jobs:
           set -euo pipefail
           printf '%s' "${GITHUB_TOKEN}" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
-      - name: Pull devcontainer image
+      - name: Pull Docker build image
         run: |
           set -euo pipefail
-          docker pull "${{ needs.devcontainer-image.outputs.image_ref }}"
-          docker tag "${{ needs.devcontainer-image.outputs.image_ref }}" "${DEVCONTAINER_IMAGE}"
-
-      - name: Start devcontainer
-        run: |
-          set -euo pipefail
-          mkdir -p "${HOME}/dataset" /tmp/.X11-unix
-          devcontainer up --workspace-folder . --remove-existing-container
+          docker pull "${{ needs.build_image.outputs.image_ref }}"
+          docker tag "${{ needs.build_image.outputs.image_ref }}" "${BUILD_IMAGE}"
 
       - name: Resolve package versions
         id: versions
@@ -211,12 +202,42 @@ jobs:
           printf 'Nightly version: %s\n' "$nightly_version"
           printf 'Release version: %s\n' "$release_version"
 
-      - name: Build packages in devcontainer
+      - name: Build packages in Docker
         shell: bash
         run: |
           set -euo pipefail
-          devcontainer exec --workspace-folder . bash -lc "$(cat <<'CONTAINER_SCRIPT'
+          docker run --rm \
+            --privileged \
+            --network host \
+            --user root \
+            --workdir /home/developer/ws \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/home/developer/ws" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e TZ=Asia/Shanghai \
+            "${BUILD_IMAGE}" \
+            bash -lc "$(cat <<'CONTAINER_BOOTSTRAP'
           set -euo pipefail
+
+          workspace=/home/developer/ws
+          host_uid="$(stat -c '%u' "$workspace")"
+          host_gid="$(stat -c '%g' "$workspace")"
+
+          if [ "$host_gid" != "$(id -g developer)" ]; then
+            groupmod -o -g "$host_gid" developer
+          fi
+          if [ "$host_uid" != "$(id -u developer)" ]; then
+            usermod -o -u "$host_uid" developer
+          fi
+
+          chown developer:developer /home/developer
+          install -d -o developer -g developer \
+            /home/developer/.cache \
+            /home/developer/.config \
+            /home/developer/.local
+
+          sudo -H -u developer bash <<'CONTAINER_SCRIPT'
+          set -euo pipefail
+          cd /home/developer/ws
 
           APP_ID='${{ env.APP_ID }}'
           DIST_DIR='${{ env.DIST_DIR }}'
@@ -483,6 +504,7 @@ jobs:
 
           find "${DIST_DIR}" -maxdepth 2 -type f -print
           CONTAINER_SCRIPT
+          CONTAINER_BOOTSTRAP
           )"
 
       - name: Publish Nightly release
@@ -528,12 +550,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if devcontainer exec --workspace-folder . bash -lc 'sudo rm -rf dist build/ci-packages'; then
-            echo "Cleaned package outputs inside devcontainer."
-          else
-            echo "Devcontainer cleanup skipped; cleaning workspace directly."
-          fi
-          rm -rf dist build/ci-packages
+          sudo rm -rf dist build/ci-packages
 
       - name: Clear GitHub Actions caches
         if: always()
