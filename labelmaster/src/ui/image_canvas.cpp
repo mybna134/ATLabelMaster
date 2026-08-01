@@ -110,6 +110,18 @@ ImageCanvas::ImageCanvas(QWidget* parent)
         visibilityShortcutTimer_, &QTimer::timeout, this,
         &ImageCanvas::commitPendingVisibilityToggle);
 
+    const auto publishAnnotations = [this] { emit annotationsChanged(dets_); };
+    connect(
+        this,
+        static_cast<void (ImageCanvas::*)(int, const Armor&)>(&ImageCanvas::detectionUpdated),
+        this, publishAnnotations);
+    connect(
+        this,
+        static_cast<void (ImageCanvas::*)(QVector<int>, const Armor&)>(
+            &ImageCanvas::detectionUpdated),
+        this, publishAnnotations);
+    connect(this, &ImageCanvas::detectionRemoved, this, publishAnnotations);
+
     qRegisterMetaType<Armor>("ImageCanvas::Armor");
     qRegisterMetaType<QVector<Armor>>("QVector<ImageCanvas::Armor>");
 }
@@ -209,6 +221,11 @@ void ImageCanvas::requestDetect() {
 
 /* ===== 外部读写 ===== */
 void ImageCanvas::setDetections(const QVector<Armor>& dets) {
+    loadDetections(dets);
+    emit annotationsChanged(dets_);
+}
+
+void ImageCanvas::loadDetections(const QVector<Armor>& dets) {
     // qDebug() << "setDetections: " << dets.size();
     cancelPendingVisibilityShortcut();
     dets_ = dets;

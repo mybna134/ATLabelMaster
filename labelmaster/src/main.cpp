@@ -106,7 +106,7 @@ int main(int argc, char* argv[]) {
         &detector, &SmartDetector::detected, w.ui()->label, &ImageCanvas::setDetections);
 
     QObject::connect(
-        &files, &FileService::labelsLoaded, w.ui()->label, &ImageCanvas::setDetections);
+        &files, &FileService::labelsLoaded, w.ui()->label, &ImageCanvas::loadDetections);
     QObject::connect(&files, &FileService::labelTextChanged, &w, &ui::MainWindow::setLabelContent);
 
     QObject::connect(

@@ -6,33 +6,35 @@
   "updateRemoteUserUID": true,
   "workspaceFolder": "/home/developer/ws",
   "workspaceMount": "source=${localWorkspaceFolder},target=/home/developer/ws,type=bind",
-  "runArgs": ["--network", "host"],
+  "runArgs": [
+    "--network",
+    "host"
+  ],
   "mounts": [
     {
       "source": "/dev",
       "target": "/dev",
-      "type": "bind",
+      "type": "bind"
     },
     {
       "source": "/tmp/.X11-unix",
       "target": "/tmp/.X11-unix",
-      "type": "bind",
+      "type": "bind"
     },
     {
       // 记得修改这里
       "source": "${localEnv:HOME}/datasets1",
       "target": "/home/developer/dataset",
-      "type": "bind",
-    },
+      "type": "bind"
+    }
   ],
   "containerEnv": {
-    "DISPLAY": "${localEnv:DISPLAY}",
+    "DISPLAY": "${localEnv:DISPLAY}"
   },
-
   "customizations": {
     "vscode": {
       "settings": {
-        "terminal.integrated.shell.linux": "/bin/bash",
+        "terminal.integrated.shell.linux": "/bin/bash"
       },
       "extensions": [
         // C++ language support
@@ -46,8 +48,8 @@
         // Git enhancements
         "mhutchie.git-graph",
         "ms-vscode.cmake-tools",
-        "ms-vscode.cpptools",
-      ],
-    },
-  },
+        "ms-vscode.cpptools"
+      ]
+    }
+  }
 }

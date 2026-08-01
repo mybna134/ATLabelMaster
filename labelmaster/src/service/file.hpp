@@ -7,6 +7,7 @@
 #include <QModelIndex>
 #include <QObject>
 #include <QPersistentModelIndex>
+#include <QPointer>
 #include <QSet>
 #include <QSize>
 #include <QStringList>
@@ -15,6 +16,7 @@
 
 class QAbstractItemModel;
 class QFileSystemModel;
+class QProgressDialog;
 class QSortFilterProxyModel;
 class QImage;
 
@@ -63,7 +65,7 @@ signals:
 
     // === 打开图片时加载到的标注 ===
     void labelsLoaded(const QVector<Armor>& armors);
-    void labelTextChanged(const QString& labelText); // 标签文件文本内容
+    void labelTextChanged(const QString& labelText, DataSet format); // 标签文件内容及其当前格式
     // ===统计信息获取==
     void StasGetted(const int& targetCount, const int& fileCount);
     // ===自动保存===
@@ -73,6 +75,8 @@ private:
     // 目录加载完成后再尝试选第一张
     void selectFirst(const QString& path);
     bool openDir(const QString& dir);
+    void showDirectoryLoadProgress();
+    void closeDirectoryLoadProgress();
     bool openFileAt(const QModelIndex& proxyIndex);
     void startPendingImport();
     bool tryImportPendingDataSet(const QStringList& imagePaths);
@@ -123,6 +127,7 @@ private:
     QString pendingTargetPath_;
     QFileSystemModel* fsModel_    = nullptr; // 源模型
     QSortFilterProxyModel* proxy_ = nullptr; // 只显示图片与目录
+    QPointer<QProgressDialog> directoryLoadProgress_;
     QPersistentModelIndex proxyRoot_;
     QPersistentModelIndex proxyCurrent_;
     QString currentImagePath_;               // 当前图片绝对路径

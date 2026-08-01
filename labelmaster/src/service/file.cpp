@@ -4,6 +4,7 @@
 #include "service/file.hpp"
 #include "../util/id_convert.hpp"
 #include "../util/svg_constants.hpp"
+#include "service/format_help.hpp"
 #include "service/label_format.hpp"
 #include "types.hpp"
 #include <QApplication>
@@ -363,63 +364,13 @@ LabelPathResolution labelPathResolutionForImage(const QString& imagePath) {
     return resolution;
 }
 
-QString formatHelpHtml() {
-    return QStringLiteral(
-        "<h2>支持的标签格式</h2>"
-        "<p>坐标均为归一化值；bbox 和关键点均允许越过图像边界，<code>pts</code> 的点序为 "
-        "TL、BL、BR、TR。</p>"
-        "<table cellspacing='8'>"
-        "<tr><th align='left'>格式</th><th align='left'>字段布局</th><th "
-        "align='left'>自动处理</th></tr>"
-        "<tr><td>V1（10）</td><td><code>color class pts[4]</code></td><td>转 V6；与 UPC "
-        "并列时手动选择</td></tr>"
-        "<tr><td>V2（11）</td><td><code>color size class pts[4]</code></td><td>转 V6</td></tr>"
-        "<tr><td>V3（15）</td><td><code>color size class bbox pts[4]</code></td><td>转 V6</td></tr>"
-        "<tr><td>V4（13，36 类）</td><td><code>combined-class bbox pts[4]</code></td><td>转 "
-        "V6</td></tr>"
-        "<tr><td>V5（17，14 类）</td><td><code>class_id bbox (x y visibility)[4]</code></td><td>转 "
-        "V6</td></tr>"
-        "<tr><td>V6（19）</td><td><code>color size class bbox (x y "
-        "visibility)[4]</code></td><td>直接打开</td></tr>"
-        "<tr><td>HITSZ（10）</td><td><code>pts[4] class color</code></td><td>转 V6</td></tr>"
-        "<tr><td>UPC（10）</td><td><code>color class pts[4]</code></td><td>转 V6；类别 0～7 "
-        "时可能与 V1 冲突</td></tr>"
-        "<tr><td>UnionSecret（9）</td><td><code>combined-class pts[4]</code></td><td>转 "
-        "V6；与低编号 NWPU 数据需手动选择</td></tr>"
-        "<tr><td>NWPU（9）</td><td><code>combined-class pts[4]</code></td><td>转 V6</td></tr>"
-        "</table>"
-        "<h3>字段说明</h3>"
-        "<ul>"
-        "<li><code>bbox</code> 依次为中心点 x/y、宽、高；<code>pts[4]</code> 为四组 x/y。</li>"
-        "<li>V1、V2、V3、UPC 的 <code>color</code> 位于行首；HITSZ 将 <code>class color</code> "
-        "放在行尾。</li>"
-        "<li>V4 固定使用 36 类编码：每种颜色占 9 个编号，组内依次为 "
-        "G/Big 1/2/3/4/5/O/Small Base/Big Base。</li>"
-        "<li>V5 是原 17 字段 V6，只使用 14 类编码；class_id 允许范围为 0～13。</li>"
-        "<li>V6 的 <code>color/size/class</code> 定义与 V2/V3 "
-        "相同；四个关键点各自携带可见性：0=不可见、1=不在范围内、2=可见。</li>"
-        "<li>不含可见性字段的输入转换为 V6 时，四点可见性全部设为 2。</li>"
-        "<li>NWPU 的组合类别按 <code>color*16 + size*8 + class</code> 解码。</li>"
-        "<li>UnionSecret 格式中 B/R/G 每种颜色占 13 个编号；0～7 是 Small "
-        "G/1/2/3/4/5/O/Base，8～12 是 Big Base/G/3/4/5。class_id 全部小于 39 时需手动选择 "
-        "UnionSecret 格式或 NWPU 格式；"
-        "出现 39～63 时自动判为 NWPU。</li>"
-        "</ul>"
-        "<h3>识别规则</h3>"
-        "<p>"
-        "程序扫描目录内全部非空标签，按获得最多文件支持的格式导入；候选仍并列时要求手动选择或停止。"
-        "除 V6 外的受支持格式统一转换为 V6；空数据集默认使用 V6。"
-        "选定格式后，class 范围、字段数或其他内容错误的整个图片/标签会移入数据集根目录的 "
-        "<code>stage/images</code> 与 <code>stage/labels</code>，合法样本继续完成导入。</p>");
-}
-
 void showFormatHelp(QWidget* parent) {
     QDialog dialog(parent);
     dialog.setWindowTitle(QObject::tr("标签格式详解"));
     dialog.resize(760, 560);
     auto* layout  = new QVBoxLayout(&dialog);
     auto* browser = new QTextBrowser(&dialog);
-    browser->setHtml(formatHelpHtml());
+    browser->setHtml(labelmaster::service::formatHelpHtml());
     layout->addWidget(browser);
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
@@ -508,10 +459,41 @@ FileService::FileService(QObject* parent)
     // 异步尝试恢复上次图片（避免构造期阻塞）
     QTimer::singleShot(0, this, &FileService::tryRestoreLastVisited);
 }
-FileService::~FileService() = default;
+FileService::~FileService() {
+    if (directoryLoadProgress_)
+        delete directoryLoadProgress_.data();
+}
 
 // ---------- 模型暴露 ----------
 void FileService::exposeModel() { emit modelReady(proxy_); }
+
+void FileService::showDirectoryLoadProgress() {
+    closeDirectoryLoadProgress();
+
+    auto* progress = new QProgressDialog(QApplication::activeWindow());
+    directoryLoadProgress_ = progress;
+    progress->setWindowTitle(tr("正在打开数据集"));
+    progress->setLabelText(tr("正在索引图片目录，请稍候…"));
+    progress->setCancelButton(nullptr);
+    progress->setRange(0, 0);
+    progress->setMinimumDuration(0);
+    progress->setAutoClose(false);
+    progress->setAutoReset(false);
+    progress->setWindowModality(Qt::ApplicationModal);
+    progress->show();
+    progress->raise();
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+}
+
+void FileService::closeDirectoryLoadProgress() {
+    if (!directoryLoadProgress_)
+        return;
+
+    QProgressDialog* progress = directoryLoadProgress_;
+    directoryLoadProgress_.clear();
+    progress->close();
+    progress->deleteLater();
+}
 
 // ---------- 打开入口 ----------
 
@@ -897,6 +879,8 @@ bool FileService::openFileAt(const QModelIndex& proxyIndex) {
         saveLastVisited(path);
     const QString lbl = conflictMode_ ? stageLabelForImage(path) : labelFileForImage(path);
     if (QFile::exists(lbl)) {
+        QString labelText;
+        DataSet labelTextFormat = currentDataSet;
         QFile labelFile(lbl);
         if (labelFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
             QTextStream in(&labelFile);
@@ -905,8 +889,7 @@ bool FileService::openFileAt(const QModelIndex& proxyIndex) {
 #else
             in.setCodec("UTF-8");
 #endif
-            QString labelText = in.readAll();
-            emit labelTextChanged(labelText);
+            labelText = in.readAll();
             labelFile.close();
         }
         QVector<Armor> armors;
@@ -919,9 +902,11 @@ bool FileService::openFileAt(const QModelIndex& proxyIndex) {
                     break;
                 }
             }
+            labelTextFormat = sourceFormat;
             QString readError;
             if (labelmaster::service::label_format::readLabelFile(
                     lbl, currentImageSize_, DataSet::LabelMasterV6, armors, &readError)) {
+                labelTextFormat = DataSet::LabelMasterV6;
                 emit status(tr("冲突标签已是 LabelMaster V6，保存或重新进入时可直接归位"), 4000);
             } else {
                 QStringList lineErrors;
@@ -942,9 +927,10 @@ bool FileService::openFileAt(const QModelIndex& proxyIndex) {
         } else {
             armors = readLabelFile(lbl, currentImageSize_, currentDataSet);
         }
+        emit labelTextChanged(labelText, labelTextFormat);
         emit labelsLoaded(armors);
     } else {
-        emit labelTextChanged("");
+        emit labelTextChanged("", DataSet::LabelMasterV6);
         emit labelsLoaded({});
     }
     return true;
@@ -1175,6 +1161,7 @@ bool FileService::openDir(const QString& dir) {
         return openDir(stageImagesDir_);
 
     emit busy(true);
+    showDirectoryLoadProgress();
 
     QString lastDir           = fsModel_->rootPath();
     pendingDir_               = cleanDir; // 不清空 pendingTargetPath_，以便恢复时指定目标文件
@@ -1191,6 +1178,7 @@ bool FileService::openDir(const QString& dir) {
     const QModelIndex srcRoot = fsModel_->setRootPath(cleanDir); // 异步开始
     if (!srcRoot.isValid()) {
         LOGW(QString("无效目录：%1").arg(dir));
+        closeDirectoryLoadProgress();
         emit busy(false);
         return false;
     }
@@ -1228,7 +1216,11 @@ bool FileService::setProxyRoot(const QString& dir) {
     return true;
 }
 void FileService::startPendingImport() {
-    if (pendingDir_.isEmpty() || formatDetectionAttempted_)
+    if (pendingDir_.isEmpty()) {
+        closeDirectoryLoadProgress();
+        return;
+    }
+    if (formatDetectionAttempted_)
         return;
 
     QStringList imagePaths;
@@ -1237,6 +1229,7 @@ void FileService::startPendingImport() {
 
     formatDetectionAttempted_ = true;
     const QString dir         = pendingDir_;
+    closeDirectoryLoadProgress();
     const bool succeeded      = tryImportPendingDataSet(imagePaths);
     formatDetectionFinished_  = true;
     if (!succeeded) {

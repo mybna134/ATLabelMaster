@@ -46,8 +46,6 @@ signals:
     void sigDroppedPaths(const QStringList&);
     void sigKeyCommand(const QString&);
     void sigStasUpdateRequested(const int& targetCount, const int& fileCount); // 统计信息输出
-    // —— 类别相关输出 ——
-    void sigLabelContentChanged(const QString& content); // 标签文件内容变化
     void sigStasGetted(const int& targetCount, const int& fileCount);
 
     // FILE：通知 service 侧刷新索引（可选但推荐）
@@ -70,8 +68,8 @@ public slots:
     void setRoot(const QModelIndex& idx);
     void setConflictMode(bool enabled, int remaining);
 
-    // —— 标签内容查看器 ——
-    void setLabelContent(const QString& content);
+    // —— 标签内容编辑器 ——
+    void setLabelContent(const QString& content, DataSet format);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -84,11 +82,17 @@ private:
     void setupActions();
     void wireButtonsToActions();
     bool textInputHasFocus() const;
+    void applyLabelTextToCanvas(bool showStatus);
+    bool updateLabelTextFromAnnotations(const QVector<Armor>& armors);
+    void setLabelTextValidation(bool valid, const QString& error = {});
 
 private:
     std::unique_ptr<Ui::MainWindow> ui_;
     bool logTimestamp_    = true;
     bool dragDropEnabled_ = true;
+    DataSet labelTextFormat_ = DataSet::LabelMasterV6;
+    bool labelTextValid_     = true;
+    QString labelTextError_;
 
 };
 

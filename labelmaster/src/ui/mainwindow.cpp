@@ -1,6 +1,8 @@
 #include "mainwindow.hpp"
 #include "controller/settings.hpp"
 #include "logger/core.hpp"
+#include "service/format_help.hpp"
+#include "service/label_format.hpp"
 #include "ui/image_canvas.hpp"
 #include "ui/settings_dialog.hpp"
 #include "ui/stas_dialog.h"
@@ -22,9 +24,12 @@
 #include <QLabel>
 #include <QMimeData>
 #include <QPixmap>
+#include <QSignalBlocker>
 #include <QStyle>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTabWidget>
+#include <QTextBrowser>
 #include <QTextEdit>
 #include <QTreeView>
 #include <QUrl>
@@ -134,18 +139,27 @@ MainWindow::MainWindow(QWidget* parent)
         tv->setUniformRowHeights(true);
     }
 
-    // 标签内容查看器：初始化为只读
+    // 标签内容编辑器：文本变化会立即解析并重绘画布。
     if (auto* edit = ui_->label_content_edit) {
-        edit->setReadOnly(true);
+        edit->setReadOnly(false);
+        connect(edit, &QTextEdit::textChanged, this, [this] { applyLabelTextToCanvas(true); });
     }
 
-    // 连接标签内容更新信号
-    connect(this, &MainWindow::sigLabelContentChanged, this, [this](const QString& content) {
-        if (ui_->label_content_edit)
-            ui_->label_content_edit->setPlainText(content);
-    });
+    connect(
+        ui_->label, &ImageCanvas::annotationsChanged, this,
+        &MainWindow::updateLabelTextFromAnnotations);
 
-    connect(this, &MainWindow::sigSaveRequested, ui_->label, &ImageCanvas::requestSave);
+    connect(this, &MainWindow::sigSaveRequested, this, [this] {
+        if (!labelTextValid_) {
+            setStatus(tr("标签文本仍有错误，未保存：%1").arg(labelTextError_), 5000);
+            if (ui_->label_content_edit)
+                ui_->label_content_edit->setFocus();
+            return;
+        }
+        if (!updateLabelTextFromAnnotations({}))
+            return;
+        ui_->label->requestSave();
+    });
 
     // 智能标注
     connect(this, &MainWindow::sigSmartAnnotateRequested, ui_->label, &ImageCanvas::requestDetect);
@@ -181,9 +195,12 @@ void MainWindow::showHelpDialog() {
     dialog.setWindowIcon(applicationIcon(this));
     dialog.resize(720, 520);
 
-    auto* layout = new QVBoxLayout(&dialog);
-    auto* title  = new QLabel(tr("当前快捷键设置"), &dialog);
-    auto* table  = new QTableWidget(&dialog);
+    auto* layout      = new QVBoxLayout(&dialog);
+    auto* tabs        = new QTabWidget(&dialog);
+    auto* shortcutTab = new QWidget(tabs);
+    auto* shortcutLayout = new QVBoxLayout(shortcutTab);
+    auto* title           = new QLabel(tr("当前快捷键设置"), shortcutTab);
+    auto* table           = new QTableWidget(shortcutTab);
 
     const QString globalScope = tr("全局");
     const QString canvasScope = tr("画布");
@@ -225,11 +242,18 @@ void MainWindow::showHelpDialog() {
     for (int row = 0; row < shortcuts.size(); ++row)
         addShortcutRow(table, row, shortcuts.at(row));
 
+    shortcutLayout->addWidget(title);
+    shortcutLayout->addWidget(table);
+    tabs->addTab(shortcutTab, tr("快捷键"));
+
+    auto* formatBrowser = new QTextBrowser(tabs);
+    formatBrowser->setHtml(labelmaster::service::formatHelpHtml());
+    tabs->addTab(formatBrowser, tr("标签格式"));
+
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
-    layout->addWidget(title);
-    layout->addWidget(table);
+    layout->addWidget(tabs);
     layout->addWidget(buttons);
     dialog.exec();
 }
@@ -349,9 +373,88 @@ void MainWindow::setUiEnabled(bool on) {
         w->setEnabled(on);
 }
 
-void MainWindow::setLabelContent(const QString& content) {
-    if (ui_->label_content_edit)
+void MainWindow::setLabelContent(const QString& content, DataSet format) {
+    if (!ui_->label_content_edit)
+        return;
+
+    labelTextFormat_ = format == DataSet::Auto ? DataSet::LabelMasterV6 : format;
+    {
+        const QSignalBlocker blocker(ui_->label_content_edit);
         ui_->label_content_edit->setPlainText(content);
+    }
+    applyLabelTextToCanvas(false);
+}
+
+void MainWindow::applyLabelTextToCanvas(bool showStatus) {
+    if (!ui_->label_content_edit || !ui_->label)
+        return;
+
+    const QString text = ui_->label_content_edit->toPlainText();
+    const QSize imageSize = ui_->label->currentImage().size();
+    if (!imageSize.isValid()) {
+        ui_->label->loadDetections({});
+        const QString error = text.trimmed().isEmpty() ? QString() : tr("请先打开图片");
+        setLabelTextValidation(error.isEmpty(), error);
+        if (showStatus && !error.isEmpty())
+            setStatus(error, 3000);
+        return;
+    }
+
+    QVector<Armor> armors;
+    QStringList lineErrors;
+    QString error;
+    const bool readable = labelmaster::service::label_format::readLabelTextLenient(
+        text, imageSize, labelTextFormat_, armors, lineErrors, &error);
+    ui_->label->loadDetections(armors);
+
+    if (!readable) {
+        setLabelTextValidation(false, error);
+    } else if (!lineErrors.isEmpty()) {
+        setLabelTextValidation(false, lineErrors.front());
+    } else {
+        setLabelTextValidation(true);
+    }
+
+    if (!showStatus)
+        return;
+    if (labelTextValid_) {
+        setStatus(tr("标签文本已应用，画布已重绘（%1 个 Detector）").arg(armors.size()), 1500);
+    } else {
+        setStatus(tr("标签文本未完整应用：%1").arg(labelTextError_), 4000);
+    }
+}
+
+bool MainWindow::updateLabelTextFromAnnotations(const QVector<Armor>& armors) {
+    if (!ui_->label_content_edit || !ui_->label)
+        return false;
+
+    const QVector<Armor>& currentArmors = armors.isEmpty() ? ui_->label->detections() : armors;
+    QString text;
+    QString error;
+    if (!labelmaster::service::label_format::writeLabelText(
+            text, ui_->label->currentImage().size(), LabelOutputFormat::LabelMasterV6,
+            currentArmors, &error)) {
+        setLabelTextValidation(false, error);
+        setStatus(tr("无法同步标签文本：%1").arg(error), 4000);
+        return false;
+    }
+
+    labelTextFormat_ = DataSet::LabelMasterV6;
+    {
+        const QSignalBlocker blocker(ui_->label_content_edit);
+        ui_->label_content_edit->setPlainText(text);
+    }
+    setLabelTextValidation(true);
+    return true;
+}
+
+void MainWindow::setLabelTextValidation(bool valid, const QString& error) {
+    labelTextValid_ = valid;
+    labelTextError_ = valid ? QString() : error;
+    if (ui_->label_content_edit) {
+        ui_->label_content_edit->setToolTip(
+            valid ? tr("可直接编辑标签；合法内容会实时同步到画布") : labelTextError_);
+    }
 }
 
 void MainWindow::setConflictMode(bool enabled, int remaining) {

@@ -61,10 +61,23 @@ bool readLabelFile(
     const QString& path, const QSize& imageSize, DataSet format, QVector<Armor>& armors,
     QString* error = nullptr);
 
+bool readLabelText(
+    const QString& text, const QSize& imageSize, DataSet format, QVector<Armor>& armors,
+    QString* error = nullptr);
+
 // 冲突处理模式使用：保留能够解析的行，并报告无法解析的行。
 bool readLabelFileLenient(
     const QString& path, const QSize& imageSize, DataSet format, QVector<Armor>& armors,
     QStringList& lineErrors, QString* error = nullptr);
+
+// 文本框实时编辑使用：合法行立即反映到画布，错误行单独报告。
+bool readLabelTextLenient(
+    const QString& text, const QSize& imageSize, DataSet format, QVector<Armor>& armors,
+    QStringList& lineErrors, QString* error = nullptr);
+
+bool writeLabelText(
+    QString& text, const QSize& imageSize, LabelOutputFormat format,
+    const QVector<Armor>& armors, QString* error = nullptr);
 
 bool writeLabelFile(
     const QString& path, const QSize& imageSize, LabelOutputFormat format,

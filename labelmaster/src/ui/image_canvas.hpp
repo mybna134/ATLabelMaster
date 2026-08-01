@@ -42,6 +42,7 @@ public:
     QRect roi() const { return roiImg_; }
     void clearRoi();
     QImage cropRoi() const;
+    const QVector<Armor>& detections() const { return dets_; }
 
     // 视图
     void resetView();
@@ -53,7 +54,8 @@ public slots:
     void requestSave();
 
     // 检测结果显示/外部读写
-    void setDetections(const QVector<Armor>& dets);  // 覆盖全部
+    void setDetections(const QVector<Armor>& dets);  // 覆盖全部，并作为一次编辑发布
+    void loadDetections(const QVector<Armor>& dets); // 从文件/文本加载，不反向改写文本
     void clearDetections();
     void createNewDetection();                       // 新建一个Detction
     void addDetection(const Armor& a);               // (新建之后调用)追加一个
@@ -94,6 +96,7 @@ signals:
     void detectionUpdated(int index, const Armor&);              // 类别或点被改
     void detectionUpdated(QVector<int> indexList, const Armor&); // 类别或点被改
     void detectionRemoved(int index);                            // 删除哪个
+    void annotationsChanged(const QVector<Armor>& armors);       // 任意画布标注编辑
     void shortcutFeedback(const QString& message);
 
     // 批量发布（供外部保存）

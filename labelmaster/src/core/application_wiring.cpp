@@ -127,7 +127,7 @@ void ApplicationWiring::connectFileServiceToImageCanvas() {
     // FileService -> ImageCanvas
     QObject::connect(
         &fileService_, &FileService::labelsLoaded, mainWindow_.ui()->label,
-        &::ImageCanvas::setDetections);
+        &::ImageCanvas::loadDetections);
 
     QObject::connect(
         &fileService_, &FileService::labelTextChanged, &mainWindow_,

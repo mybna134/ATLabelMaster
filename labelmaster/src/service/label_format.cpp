@@ -512,6 +512,21 @@ PreparedLabel readPreparedLabel(const QString& path) {
     return prepared;
 }
 
+PreparedLabel readPreparedLabelText(const QString& text) {
+    PreparedLabel prepared;
+    const QStringList lines = text.split(QLatin1Char('\n'));
+    for (int index = 0; index < lines.size(); ++index) {
+        QString line      = lines[index];
+        const int comment = line.indexOf(QLatin1Char('#'));
+        if (comment >= 0)
+            line = line.left(comment);
+        line = line.simplified();
+        if (!line.isEmpty())
+            prepared.lines.push_back({index + 1, line.split(QLatin1Char(' '))});
+    }
+    return prepared;
+}
+
 QVector<DataSet> candidateFormatsForFieldCount(int fieldCount) {
     switch (fieldCount) {
     case 19: return {DataSet::LabelMasterV6};
@@ -794,6 +809,12 @@ bool readLabelFile(
     return parsePreparedLabel(readPreparedLabel(path), format, imageSize, armors, error);
 }
 
+bool readLabelText(
+    const QString& text, const QSize& imageSize, DataSet format, QVector<Armor>& armors,
+    QString* error) {
+    return parsePreparedLabel(readPreparedLabelText(text), format, imageSize, armors, error);
+}
+
 bool readLabelFileLenient(
     const QString& path, const QSize& imageSize, DataSet format, QVector<Armor>& armors,
     QStringList& lineErrors, QString* error) {
@@ -835,26 +856,39 @@ bool readLabelFileLenient(
     return true;
 }
 
-bool writeLabelFile(
-    const QString& path, const QSize& imageSize, LabelOutputFormat format,
+bool readLabelTextLenient(
+    const QString& text, const QSize& imageSize, DataSet format, QVector<Armor>& armors,
+    QStringList& lineErrors, QString* error) {
+    armors.clear();
+    lineErrors.clear();
+    const PreparedLabel prepared = readPreparedLabelText(text);
+    if (!prepared.error.isEmpty()) {
+        setError(error, prepared.error);
+        return false;
+    }
+    for (const PreparedLine& line : prepared.lines) {
+        Armor armor;
+        QString lineError;
+        if (!parseLine(line.fields, imageSize, format, armor, lineError)) {
+            lineErrors.push_back(
+                QString("第 %1 行格式错误: %2").arg(line.lineNumber).arg(lineError));
+            continue;
+        }
+        armors.push_back(armor);
+    }
+    return true;
+}
+
+bool writeLabelText(
+    QString& text, const QSize& imageSize, LabelOutputFormat format,
     const QVector<Armor>& armors, QString* error) {
+    text.clear();
     if (imageSize.width() <= 0 || imageSize.height() <= 0) {
         setError(error, "图片尺寸无效");
         return false;
     }
-    QDir().mkpath(QFileInfo(path).absolutePath());
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        setError(error, QString("无法写入标签: %1").arg(path));
-        return false;
-    }
-
-    QTextStream stream(&file);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-    stream.setEncoding(QStringConverter::Utf8);
-#else
-    stream.setCodec("UTF-8");
-#endif
+    QString output;
+    QTextStream stream(&output, QIODevice::WriteOnly);
     stream.setRealNumberNotation(QTextStream::FixedNotation);
     stream.setRealNumberPrecision(6);
 
@@ -864,7 +898,6 @@ bool writeLabelFile(
         const int classId  = classIdFromToken(armor.cls);
         if (!validColor(colorId) || !validSize(armor.size) || !validClass(classId)) {
             setError(error, QString("第 %1 个标注的颜色/尺寸/类别无效").arg(index + 1));
-            file.cancelWriting();
             return false;
         }
         const auto points = normalizedPoints(armor, imageSize);
@@ -885,7 +918,6 @@ bool writeLabelFile(
                         error, QString("第 %1 个标注的第 %2 个关键点可见性无效")
                                    .arg(index + 1)
                                    .arg(pointIndex + 1));
-                    file.cancelWriting();
                     return false;
                 }
                 stream << ' ';
@@ -902,7 +934,6 @@ bool writeLabelFile(
             QString encodeError;
             if (!encodeV4Class(colorId, armor.size, classId, encoded, encodeError)) {
                 setError(error, QString("第 %1 个标注无法写入 V4：%2").arg(index + 1).arg(encodeError));
-                file.cancelWriting();
                 return false;
             }
             stream << encoded << ' ' << bbox.centerX << ' '
@@ -922,6 +953,32 @@ bool writeLabelFile(
         stream << '\n';
     }
 
+    stream.flush();
+    text = output;
+    return true;
+}
+
+bool writeLabelFile(
+    const QString& path, const QSize& imageSize, LabelOutputFormat format,
+    const QVector<Armor>& armors, QString* error) {
+    QString text;
+    if (!writeLabelText(text, imageSize, format, armors, error))
+        return false;
+
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        setError(error, QString("无法写入标签: %1").arg(path));
+        return false;
+    }
+
+    QTextStream stream(&file);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    stream.setEncoding(QStringConverter::Utf8);
+#else
+    stream.setCodec("UTF-8");
+#endif
+    stream << text;
     stream.flush();
     if (!file.commit()) {
         setError(error, QString("无法原子替换标签: %1").arg(path));
