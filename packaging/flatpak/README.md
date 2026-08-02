@@ -7,13 +7,6 @@ The app does not bundle `libQt6*.so` or set a custom `QT_PLUGIN_PATH`.
 
 Install the build dependencies and build from the repository root:
 
-On Debian/Ubuntu, `flatpak-builder` needs the separate `appstream-compose`
-package when exporting a repository:
-
-```sh
-sudo apt-get install flatpak flatpak-builder appstream appstream-compose
-```
-
 ```sh
 flatpak remote-add --user --if-not-exists flathub \
   https://dl.flathub.org/repo/flathub.flatpakrepo

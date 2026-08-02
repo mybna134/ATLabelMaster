@@ -251,7 +251,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             appstream \
-            appstream-compose \
             desktop-file-utils \
             dpkg-dev \
             elfutils \
@@ -260,7 +259,6 @@ jobs:
             flatpak-builder \
             librsvg2-common \
             patchelf
-          command -v appstream-compose >/dev/null
           sudo rm -rf /var/lib/apt/lists/*
 
           rm -rf "${DIST_DIR}"
