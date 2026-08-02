@@ -1,6 +1,7 @@
 #include "image_canvas.hpp"
 #include "../util/bridge.hpp"
 #include "../util/id_convert.hpp"
+#include "../util/keyboard_shortcuts.hpp"
 #include "../util/svg_constants.hpp"
 #include "controller/settings.hpp"
 #include "dataset/dataset.h"
@@ -110,10 +111,13 @@ ImageCanvas::ImageCanvas(QWidget* parent)
         visibilityShortcutTimer_, &QTimer::timeout, this,
         &ImageCanvas::commitPendingVisibilityToggle);
 
-    const auto publishAnnotations = [this] { emit annotationsChanged(dets_); };
+    const auto publishAnnotations = [this] {
+        emit annotationsChanged(dets_);
+        if (!coalescingHistoryEdit_ && !restoringAnnotationHistory_)
+            recordAnnotationHistory();
+    };
     connect(
-        this,
-        static_cast<void (ImageCanvas::*)(int, const Armor&)>(&ImageCanvas::detectionUpdated),
+        this, static_cast<void (ImageCanvas::*)(int, const Armor&)>(&ImageCanvas::detectionUpdated),
         this, publishAnnotations);
     connect(
         this,
@@ -121,6 +125,8 @@ ImageCanvas::ImageCanvas(QWidget* parent)
             &ImageCanvas::detectionUpdated),
         this, publishAnnotations);
     connect(this, &ImageCanvas::detectionRemoved, this, publishAnnotations);
+
+    resetAnnotationHistory();
 
     qRegisterMetaType<Armor>("ImageCanvas::Armor");
     qRegisterMetaType<QVector<Armor>>("QVector<ImageCanvas::Armor>");
@@ -221,11 +227,14 @@ void ImageCanvas::requestDetect() {
 
 /* ===== 外部读写 ===== */
 void ImageCanvas::setDetections(const QVector<Armor>& dets) {
-    loadDetections(dets);
+    replaceDetections(dets, false);
+    recordAnnotationHistory();
     emit annotationsChanged(dets_);
 }
 
-void ImageCanvas::loadDetections(const QVector<Armor>& dets) {
+void ImageCanvas::loadDetections(const QVector<Armor>& dets) { replaceDetections(dets, true); }
+
+void ImageCanvas::replaceDetections(const QVector<Armor>& dets, bool resetHistory) {
     // qDebug() << "setDetections: " << dets.size();
     cancelPendingVisibilityShortcut();
     dets_ = dets;
@@ -246,6 +255,8 @@ void ImageCanvas::loadDetections(const QVector<Armor>& dets) {
     }
     emit detectionSelected(selectedIndex_);
     update();
+    if (resetHistory)
+        resetAnnotationHistory();
 }
 void ImageCanvas::clearDetections() {
     cancelPendingVisibilityShortcut();
@@ -258,6 +269,80 @@ void ImageCanvas::clearDetections() {
     emit detectionSelected(-1);
     emit detectionHovered(-1);
     update();
+    resetAnnotationHistory();
+}
+
+void ImageCanvas::resetAnnotationHistory() {
+    annotationHistory_.clear();
+    annotationHistory_.append(dets_);
+    annotationHistoryIndex_     = 0;
+    restoringAnnotationHistory_ = false;
+    coalescingHistoryEdit_      = false;
+    emit historyAvailabilityChanged(false, false);
+}
+
+void ImageCanvas::recordAnnotationHistory() {
+    if (restoringAnnotationHistory_)
+        return;
+    if (annotationHistoryIndex_ >= 0 && annotationHistoryIndex_ < annotationHistory_.size()
+        && annotationHistory_[annotationHistoryIndex_] == dets_) {
+        return;
+    }
+
+    if (annotationHistoryIndex_ + 1 < annotationHistory_.size())
+        annotationHistory_.resize(annotationHistoryIndex_ + 1);
+    annotationHistory_.append(dets_);
+    annotationHistoryIndex_ = annotationHistory_.size() - 1;
+
+    if (annotationHistory_.size() > kMaxAnnotationHistory) {
+        annotationHistory_.removeFirst();
+        --annotationHistoryIndex_;
+    }
+    emit historyAvailabilityChanged(annotationHistoryIndex_ > 0, false);
+}
+
+void ImageCanvas::restoreAnnotationHistory(int index) {
+    if (index < 0 || index >= annotationHistory_.size() || index == annotationHistoryIndex_)
+        return;
+
+    cancelPendingVisibilityShortcut();
+    restoringAnnotationHistory_ = true;
+    annotationHistoryIndex_     = index;
+    dets_                       = annotationHistory_[index];
+    if (dets_.isEmpty()) {
+        selectedIndex_ = -1;
+    } else if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size()) {
+        selectedIndex_ = dets_.size() - 1;
+    }
+    hoverIndex_ = -1;
+    dragHandle_ = hoverHandle_ = -1;
+    dragBBoxHandle_ = hoverBBoxHandle_ = -1;
+    bboxDragOppositeImg_               = {};
+    emit detectionSelected(selectedIndex_);
+    emit detectionHovered(-1);
+    emit annotationsChanged(dets_);
+    update();
+    restoringAnnotationHistory_ = false;
+    emit historyAvailabilityChanged(
+        annotationHistoryIndex_ > 0, annotationHistoryIndex_ + 1 < annotationHistory_.size());
+}
+
+void ImageCanvas::undo() {
+    if (annotationHistoryIndex_ <= 0) {
+        emit shortcutFeedback(tr("没有可撤销的标注编辑"));
+        return;
+    }
+    restoreAnnotationHistory(annotationHistoryIndex_ - 1);
+    emit shortcutFeedback(tr("已撤销标注编辑"));
+}
+
+void ImageCanvas::redo() {
+    if (annotationHistoryIndex_ < 0 || annotationHistoryIndex_ + 1 >= annotationHistory_.size()) {
+        emit shortcutFeedback(tr("没有可重做的标注编辑"));
+        return;
+    }
+    restoreAnnotationHistory(annotationHistoryIndex_ + 1);
+    emit shortcutFeedback(tr("已重做标注编辑"));
 }
 void ImageCanvas::addDetection(const Armor& a0) {
     Armor a = a0;
@@ -334,8 +419,8 @@ bool ImageCanvas::selectDetectionInDirection(int key) {
 
     // 尚未选中时，四个方向键都从最靠上的目标开始，同一高度取最靠左者。
     if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size()) {
-        int topLeftIndex          = 0;
-        QPointF topLeft           = centerOf(dets_.front());
+        int topLeftIndex         = 0;
+        QPointF topLeft          = centerOf(dets_.front());
         constexpr double epsilon = 0.001;
         for (int index = 1; index < dets_.size(); ++index) {
             const QPointF candidate = centerOf(dets_[index]);
@@ -357,7 +442,7 @@ bool ImageCanvas::selectDetectionInDirection(int key) {
     for (int index = 0; index < dets_.size(); ++index) {
         if (index == selectedIndex_)
             continue;
-        const QPointF delta = centerOf(dets_[index]) - origin;
+        const QPointF delta  = centerOf(dets_[index]) - origin;
         double primary       = 0.0;
         double perpendicular = 0.0;
         switch (key) {
@@ -399,15 +484,19 @@ bool ImageCanvas::selectDetectionInDirection(int key) {
     return true;
 }
 
-int ImageCanvas::visibilityPointForKey(int key) const {
-    // Armor 内部顺序：TL, BL, BR, TR；快捷键顺序：J, K, N, M。
-    switch (key) {
-    case Qt::Key_J: return 0; // 左上
-    case Qt::Key_K: return 3; // 右上
-    case Qt::Key_N: return 1; // 左下
-    case Qt::Key_M: return 2; // 右下
-    default: return -1;
-    }
+int ImageCanvas::visibilityPointForKey(int key, Qt::KeyboardModifiers modifiers) const {
+    using labelmaster::util::KeyboardAction;
+    const auto& keyboard = labelmaster::util::KeyboardManager::instance();
+    // Armor 内部顺序：TL, BL, BR, TR；默认键位依次为 F/G/C/V。
+    if (keyboard.matches(KeyboardAction::VisibilityTopLeft, key, modifiers))
+        return 0;
+    if (keyboard.matches(KeyboardAction::VisibilityTopRight, key, modifiers))
+        return 3;
+    if (keyboard.matches(KeyboardAction::VisibilityBottomLeft, key, modifiers))
+        return 1;
+    if (keyboard.matches(KeyboardAction::VisibilityBottomRight, key, modifiers))
+        return 2;
+    return -1;
 }
 
 void ImageCanvas::setKeypointVisibility(
@@ -417,8 +506,8 @@ void ImageCanvas::setKeypointVisibility(
 
     static const std::array<QString, 4> pointNames{
         tr("左上角"), tr("左下角"), tr("右下角"), tr("右上角")};
-    Armor& armor                            = dets_[detectionIndex];
-    armor.keypointVisibility[pointIndex]    = visibility;
+    Armor& armor                         = dets_[detectionIndex];
+    armor.keypointVisibility[pointIndex] = visibility;
     emit detectionUpdated(detectionIndex, armor);
     emit shortcutFeedback(tr("%1已设置为%2").arg(pointNames[pointIndex], action));
     update();
@@ -429,8 +518,8 @@ void ImageCanvas::commitPendingVisibilityToggle() {
         return;
 
     visibilityShortcutTimer_->stop();
-    const int detectionIndex = pendingVisibilityDetectionIndex_;
-    const int pointIndex     = pendingVisibilityPointIndex_;
+    const int detectionIndex         = pendingVisibilityDetectionIndex_;
+    const int pointIndex             = pendingVisibilityPointIndex_;
     pendingVisibilityDetectionIndex_ = -1;
     pendingVisibilityPointIndex_     = -1;
     if (detectionIndex < 0 || detectionIndex >= dets_.size())
@@ -438,8 +527,7 @@ void ImageCanvas::commitPendingVisibilityToggle() {
 
     const int current = dets_[detectionIndex].keypointVisibility[pointIndex];
     const int next    = current == 2 ? 0 : 2;
-    setKeypointVisibility(
-        detectionIndex, pointIndex, next, next == 2 ? tr("可见") : tr("不可见"));
+    setKeypointVisibility(detectionIndex, pointIndex, next, next == 2 ? tr("可见") : tr("不可见"));
 }
 
 void ImageCanvas::cancelPendingVisibilityShortcut() {
@@ -452,7 +540,7 @@ void ImageCanvas::cancelPendingVisibilityShortcut() {
 bool ImageCanvas::handleVisibilityShortcut(int pointIndex) {
     if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size()) {
         commitPendingVisibilityToggle();
-        emit shortcutFeedback(tr("请先用 WASD 选中一个 Detector"));
+        emit shortcutFeedback(tr("请先选中一个 Detector"));
         return true;
     }
 
@@ -460,7 +548,7 @@ bool ImageCanvas::handleVisibilityShortcut(int pointIndex) {
         && pendingVisibilityDetectionIndex_ == selectedIndex_
         && pendingVisibilityPointIndex_ == pointIndex) {
         visibilityShortcutTimer_->stop();
-        const int detectionIndex = pendingVisibilityDetectionIndex_;
+        const int detectionIndex         = pendingVisibilityDetectionIndex_;
         pendingVisibilityDetectionIndex_ = -1;
         pendingVisibilityPointIndex_     = -1;
         setKeypointVisibility(detectionIndex, pointIndex, 1, tr("不在范围内"));
@@ -476,11 +564,9 @@ bool ImageCanvas::handleVisibilityShortcut(int pointIndex) {
 }
 
 bool ImageCanvas::handleEditorShortcut(int key, Qt::KeyboardModifiers modifiers) {
-    const int visibilityPoint = visibilityPointForKey(key);
-    if (modifiers.testAnyFlags(Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {
-        commitPendingVisibilityToggle();
-        return false;
-    }
+    using labelmaster::util::KeyboardAction;
+    const auto& keyboard      = labelmaster::util::KeyboardManager::instance();
+    const int visibilityPoint = visibilityPointForKey(key, modifiers);
 
     if (visibilityPoint >= 0)
         return handleVisibilityShortcut(visibilityPoint);
@@ -488,58 +574,79 @@ bool ImageCanvas::handleEditorShortcut(int key, Qt::KeyboardModifiers modifiers)
     // 任意其他按键都会结束上一可见性键的双按等待，并落实为单按。
     commitPendingVisibilityToggle();
 
-    if (key == Qt::Key_W || key == Qt::Key_A || key == Qt::Key_S || key == Qt::Key_D)
-        return selectDetectionInDirection(key);
+    if (keyboard.matches(KeyboardAction::CancelCanvas, key, modifiers)) {
+        draggingRect_        = false;
+        dragHandle_          = -1;
+        hoverHandle_         = -1;
+        dragBBoxHandle_      = -1;
+        hoverBBoxHandle_     = -1;
+        bboxDragOppositeImg_ = {};
+        if (coalescingHistoryEdit_) {
+            coalescingHistoryEdit_ = false;
+            recordAnnotationHistory();
+        }
+        update();
+        return true;
+    }
+
+    if (keyboard.matches(KeyboardAction::EditSelected, key, modifiers)) {
+        promptEditSelectedInfo();
+        return true;
+    }
+
+    if (keyboard.matches(KeyboardAction::SelectUp, key, modifiers))
+        return selectDetectionInDirection(Qt::Key_W);
+    if (keyboard.matches(KeyboardAction::SelectLeft, key, modifiers))
+        return selectDetectionInDirection(Qt::Key_A);
+    if (keyboard.matches(KeyboardAction::SelectDown, key, modifiers))
+        return selectDetectionInDirection(Qt::Key_S);
+    if (keyboard.matches(KeyboardAction::SelectRight, key, modifiers))
+        return selectDetectionInDirection(Qt::Key_D);
 
     QString color;
     QString colorName;
     QString cls;
     QString className;
-    switch (key) {
-    case Qt::Key_R:
+    if (keyboard.matches(KeyboardAction::ColorRed, key, modifiers)) {
         color     = QStringLiteral("R");
         colorName = QStringLiteral("Red");
-        break;
-    case Qt::Key_G:
+    } else if (keyboard.matches(KeyboardAction::ColorGray, key, modifiers)) {
         color     = QStringLiteral("G");
         colorName = QStringLiteral("Gray");
-        break;
-    case Qt::Key_B:
+    } else if (keyboard.matches(KeyboardAction::ColorBlue, key, modifiers)) {
         color     = QStringLiteral("B");
         colorName = QStringLiteral("Blue");
-        break;
-    case Qt::Key_P:
+    } else if (keyboard.matches(KeyboardAction::ColorPurple, key, modifiers)) {
         color     = QStringLiteral("P");
         colorName = QStringLiteral("Purple");
-        break;
-    case Qt::Key_1:
-    case Qt::Key_2:
-    case Qt::Key_3:
-    case Qt::Key_4:
-    case Qt::Key_5:
-        cls       = QString::number(key - Qt::Key_0);
-        className = cls;
-        break;
-    case Qt::Key_O:
-        cls = QStringLiteral("O");
+    } else if (keyboard.matches(KeyboardAction::ClassSentry, key, modifiers)) {
+        cls       = QStringLiteral("G");
+        className = QStringLiteral("G");
+    } else if (keyboard.matches(KeyboardAction::Class1, key, modifiers)) {
+        cls = className = QStringLiteral("1");
+    } else if (keyboard.matches(KeyboardAction::Class2, key, modifiers)) {
+        cls = className = QStringLiteral("2");
+    } else if (keyboard.matches(KeyboardAction::Class3, key, modifiers)) {
+        cls = className = QStringLiteral("3");
+    } else if (keyboard.matches(KeyboardAction::Class4, key, modifiers)) {
+        cls = className = QStringLiteral("4");
+    } else if (keyboard.matches(KeyboardAction::Class5, key, modifiers)) {
+        cls = className = QStringLiteral("5");
+    } else if (keyboard.matches(KeyboardAction::ClassOutpost, key, modifiers)) {
+        cls       = QStringLiteral("O");
         className = QStringLiteral("Outpost");
-        break;
-    case Qt::Key_L:
-        cls = QStringLiteral("B");
+    } else if (keyboard.matches(KeyboardAction::ClassBase, key, modifiers)) {
+        cls       = QStringLiteral("B");
         className = QStringLiteral("Base");
-        break;
-    default: break;
     }
 
-    const bool setBig = key == Qt::Key_Plus
-                     || (key == Qt::Key_Equal
-                         && modifiers.testFlag(Qt::ShiftModifier));
-    const bool setSmall = key == Qt::Key_Minus;
+    const bool setBig   = keyboard.matches(KeyboardAction::SizeBig, key, modifiers);
+    const bool setSmall = keyboard.matches(KeyboardAction::SizeSmall, key, modifiers);
     if (color.isEmpty() && cls.isEmpty() && !setBig && !setSmall)
         return false;
 
     if (selectedIndex_ < 0 || selectedIndex_ >= dets_.size()) {
-        emit shortcutFeedback(tr("请先用 WASD 选中一个 Detector"));
+        emit shortcutFeedback(tr("请先选中一个 Detector"));
         return true;
     }
 
@@ -1005,15 +1112,17 @@ void ImageCanvas::mousePressEvent(QMouseEvent* e) {
             if (selectedIndex_ >= 0 && selectedIndex_ < dets_.size()) {
                 hoverBBoxHandle_ = hitBBoxHandleOnSelected(e->pos());
                 if (hoverBBoxHandle_ >= 0) {
-                    dragBBoxHandle_      = hoverBBoxHandle_;
-                    const auto corners   = bboxCornersInImage(dets_[selectedIndex_]);
-                    bboxDragOppositeImg_ = corners[(dragBBoxHandle_ + 2) % 4];
+                    dragBBoxHandle_        = hoverBBoxHandle_;
+                    const auto corners     = bboxCornersInImage(dets_[selectedIndex_]);
+                    bboxDragOppositeImg_   = corners[(dragBBoxHandle_ + 2) % 4];
+                    coalescingHistoryEdit_ = true;
                     update();
                     return;
                 }
                 hoverHandle_ = hitHandleOnSelected(e->pos());
                 if (hoverHandle_ >= 0) {
-                    dragHandle_ = hoverHandle_;
+                    dragHandle_            = hoverHandle_;
+                    coalescingHistoryEdit_ = true;
                     update();
                     return;
                 }
@@ -1112,8 +1221,9 @@ void ImageCanvas::mouseReleaseEvent(QMouseEvent* e) {
         }
 
         if (dragBBoxHandle_ >= 0) {
-            dragBBoxHandle_      = -1;
-            bboxDragOppositeImg_ = {};
+            dragBBoxHandle_        = -1;
+            bboxDragOppositeImg_   = {};
+            coalescingHistoryEdit_ = false;
             if (selectedIndex_ >= 0 && selectedIndex_ < dets_.size())
                 emit detectionUpdated(selectedIndex_, dets_[selectedIndex_]);
             update();
@@ -1121,7 +1231,8 @@ void ImageCanvas::mouseReleaseEvent(QMouseEvent* e) {
         }
 
         if (dragHandle_ >= 0) {
-            dragHandle_ = -1;
+            dragHandle_            = -1;
+            coalescingHistoryEdit_ = false;
             if (selectedIndex_ >= 0 && selectedIndex_ < dets_.size()) {
                 emit detectionUpdated(selectedIndex_, dets_[selectedIndex_]);
             }
@@ -1321,26 +1432,7 @@ void ImageCanvas::keyPressEvent(QKeyEvent* e) {
         return;
     }
 
-    if (e->key() == Qt::Key_F2 || e->key() == Qt::Key_C) {
-        promptEditSelectedInfo();
-        e->accept();
-        return;
-    }
-
     if (handleEditorShortcut(e->key(), e->modifiers())) {
-        e->accept();
-        return;
-    }
-
-    if (e->key() == Qt::Key_Escape) {
-        // 取消任何进行中的微操作
-        draggingRect_        = false;
-        dragHandle_          = -1;
-        hoverHandle_         = -1;
-        dragBBoxHandle_      = -1;
-        hoverBBoxHandle_     = -1;
-        bboxDragOppositeImg_ = {};
-        update();
         e->accept();
         return;
     }

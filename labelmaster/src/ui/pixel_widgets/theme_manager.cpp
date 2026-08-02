@@ -7,6 +7,7 @@
  */
 
 #include "theme_manager.hpp"
+#include "controller/settings.hpp"
 
 #include <QFile>
 #include <QJsonDocument>
@@ -88,6 +89,7 @@ ThemeManager::ThemeManager()
 {
     // Determine assets path
     QStringList paths = {
+        controller::AppSettings::instance().assetsDir() + "/themes",
         QDir::currentPath() + "/assets/themes",
         QDir::currentPath() + "/../assets/themes",
         QCoreApplication::applicationDirPath() + "/../assets/themes",

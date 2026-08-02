@@ -351,9 +351,6 @@
    <property name="toolTip">
     <string>打开文件夹</string>
    </property>
-   <property name="shortcut">
-    <string>Ctrl+O</string>
-   </property>
   </action>
   <action name="actionSave">
    <property name="text">
@@ -362,65 +359,41 @@
    <property name="toolTip">
     <string>保存标注</string>
    </property>
-   <property name="shortcut">
-    <string>Ctrl+S</string>
-   </property>
   </action>
   <action name="actionPrev">
    <property name="text">
     <string>上一张</string>
-   </property>
-   <property name="shortcut">
-    <string>Q</string>
    </property>
   </action>
   <action name="actionNext">
    <property name="text">
     <string>下一张</string>
    </property>
-   <property name="shortcut">
-    <string>E</string>
-   </property>
   </action>
   <action name="actionHistEq">
    <property name="text">
     <string>直方图均衡化</string>
-   </property>
-   <property name="shortcut">
-    <string>H</string>
    </property>
   </action>
   <action name="actionDelete">
    <property name="text">
     <string>删除图片</string>
    </property>
-   <property name="shortcut">
-    <string>Del</string>
-   </property>
   </action>
   <action name="actionSmart">
    <property name="text">
     <string>智能标注</string>
-   </property>
-   <property name="shortcut">
-    <string>Space</string>
    </property>
   </action>
   <action name="actionSettings">
    <property name="text">
     <string>设置</string>
    </property>
-   <property name="shortcut">
-    <string>Esc</string>
-   </property>
   </action>
 
   <action name="actionStas">
    <property name="text">
     <string>数据统计</string>
-   </property>
-   <property name="shortcut">
-    <string>F1</string>
    </property>
   </action>
 
@@ -438,7 +411,7 @@
     <string>帮助</string>
    </property>
    <property name="toolTip">
-    <string>查看当前快捷键设置</string>
+    <string>查看标签格式帮助</string>
    </property>
   </action>
 

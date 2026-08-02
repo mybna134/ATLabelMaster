@@ -22,6 +22,8 @@ struct Armor {
     double norm_y = -1; // center_y，可位于图像外
     double norm_w = -1; // width；负数表示 bbox 尚未设置
     double norm_h = -1; // height；负数表示 bbox 尚未设置
+
+    bool operator==(const Armor&) const = default;
 };
 
 Q_DECLARE_METATYPE(Armor)

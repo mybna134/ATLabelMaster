@@ -6,6 +6,7 @@
 #include "ui/image_canvas.hpp"
 #include "ui/settings_dialog.hpp"
 #include "ui/stas_dialog.h"
+#include "util/keyboard_shortcuts.hpp"
 #include <QAction>
 #include <QApplication>
 #include <QCoreApplication>
@@ -15,7 +16,6 @@
 #include <QDir>
 #include <QEvent>
 #include <QFile>
-#include <QHeaderView>
 #include <QHBoxLayout>
 #include <QIcon>
 #include <QImage>
@@ -26,9 +26,6 @@
 #include <QPixmap>
 #include <QSignalBlocker>
 #include <QStyle>
-#include <QTableWidget>
-#include <QTableWidgetItem>
-#include <QTabWidget>
 #include <QTextBrowser>
 #include <QTextEdit>
 #include <QTreeView>
@@ -43,32 +40,10 @@
 using ui::MainWindow;
 
 #ifndef LABELMASTER_VERSION
-#define LABELMASTER_VERSION "1.2.2"
+# define LABELMASTER_VERSION "1.2.2"
 #endif
 
 namespace {
-
-struct ShortcutRow {
-    QString scope;
-    QString action;
-    QString shortcut;
-};
-
-QString displayActionText(const QAction* action) {
-    if (!action)
-        return {};
-    QString text = action->text();
-    text.remove(QLatin1Char('&'));
-    return text;
-}
-
-QString displayShortcut(const QAction* action, const QString& emptyText) {
-    if (!action)
-        return emptyText;
-
-    const QString text = action->shortcut().toString(QKeySequence::NativeText);
-    return text.isEmpty() ? emptyText : text;
-}
 
 QString applicationVersionText() {
     const QString version = QCoreApplication::applicationVersion();
@@ -107,12 +82,6 @@ QIcon applicationIcon(QWidget* widget) {
     }
 
     return widget ? widget->style()->standardIcon(QStyle::SP_ComputerIcon) : QIcon{};
-}
-
-void addShortcutRow(QTableWidget* table, int row, const ShortcutRow& shortcut) {
-    table->setItem(row, 0, new QTableWidgetItem(shortcut.scope));
-    table->setItem(row, 1, new QTableWidgetItem(shortcut.action));
-    table->setItem(row, 2, new QTableWidgetItem(shortcut.shortcut));
 }
 
 } // namespace
@@ -195,65 +164,14 @@ void MainWindow::showHelpDialog() {
     dialog.setWindowIcon(applicationIcon(this));
     dialog.resize(720, 520);
 
-    auto* layout      = new QVBoxLayout(&dialog);
-    auto* tabs        = new QTabWidget(&dialog);
-    auto* shortcutTab = new QWidget(tabs);
-    auto* shortcutLayout = new QVBoxLayout(shortcutTab);
-    auto* title           = new QLabel(tr("当前快捷键设置"), shortcutTab);
-    auto* table           = new QTableWidget(shortcutTab);
-
-    const QString globalScope = tr("全局");
-    const QString canvasScope = tr("画布");
-    const QString empty       = tr("未设置");
-    const QList<ShortcutRow> shortcuts{
-        {globalScope, displayActionText(ui_->actionOpen), displayShortcut(ui_->actionOpen, empty)},
-        {globalScope, displayActionText(ui_->actionSave), displayShortcut(ui_->actionSave, empty)},
-        {globalScope, displayActionText(ui_->actionDelete), displayShortcut(ui_->actionDelete, empty)},
-        {globalScope, displayActionText(ui_->actionPrev), displayShortcut(ui_->actionPrev, empty)},
-        {globalScope, displayActionText(ui_->actionNext), displayShortcut(ui_->actionNext, empty)},
-        {globalScope, displayActionText(ui_->actionHistEq), displayShortcut(ui_->actionHistEq, empty)},
-        {globalScope, displayActionText(ui_->actionSmart), displayShortcut(ui_->actionSmart, empty)},
-        {globalScope, displayActionText(ui_->actionSettings), displayShortcut(ui_->actionSettings, empty)},
-        {globalScope, displayActionText(ui_->actionStas), displayShortcut(ui_->actionStas, empty)},
-        {globalScope, displayActionText(ui_->actionFilter), displayShortcut(ui_->actionFilter, empty)},
-        {globalScope, displayActionText(ui_->actionHelp), displayShortcut(ui_->actionHelp, empty)},
-        {globalScope, displayActionText(ui_->actionAbout), displayShortcut(ui_->actionAbout, empty)},
-        {canvasScope, tr("选择 Detector"), tr("W / A / S / D")},
-        {canvasScope, tr("编辑选中 Detector"), tr("F2 / C / 双击")},
-        {canvasScope, tr("设置颜色：Red / Gray / Blue / Purple"), tr("R / G / B / P")},
-        {canvasScope, tr("设置类别：1-5 / Outpost / Base"), tr("1 / 2 / 3 / 4 / 5 / O / L")},
-        {canvasScope, tr("设置大小：Big / Small"), tr("+ / -")},
-        {canvasScope, tr("设置关键点可见性：左上 / 右上 / 左下 / 右下"), tr("J / K / N / M")},
-        {canvasScope, tr("取消当前画布操作"), tr("Esc")},
-    };
-
-    table->setColumnCount(3);
-    table->setRowCount(shortcuts.size());
-    table->setHorizontalHeaderLabels({tr("范围"), tr("操作"), tr("快捷键")});
-    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    table->setSelectionMode(QAbstractItemView::NoSelection);
-    table->setAlternatingRowColors(true);
-    table->verticalHeader()->setVisible(false);
-    table->horizontalHeader()->setStretchLastSection(true);
-    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
-    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
-
-    for (int row = 0; row < shortcuts.size(); ++row)
-        addShortcutRow(table, row, shortcuts.at(row));
-
-    shortcutLayout->addWidget(title);
-    shortcutLayout->addWidget(table);
-    tabs->addTab(shortcutTab, tr("快捷键"));
-
-    auto* formatBrowser = new QTextBrowser(tabs);
+    auto* layout        = new QVBoxLayout(&dialog);
+    auto* formatBrowser = new QTextBrowser(&dialog);
     formatBrowser->setHtml(labelmaster::service::formatHelpHtml());
-    tabs->addTab(formatBrowser, tr("标签格式"));
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
-    layout->addWidget(tabs);
+    layout->addWidget(formatBrowser);
     layout->addWidget(buttons);
     dialog.exec();
 }
@@ -389,7 +307,7 @@ void MainWindow::applyLabelTextToCanvas(bool showStatus) {
     if (!ui_->label_content_edit || !ui_->label)
         return;
 
-    const QString text = ui_->label_content_edit->toPlainText();
+    const QString text    = ui_->label_content_edit->toPlainText();
     const QSize imageSize = ui_->label->currentImage().size();
     if (!imageSize.isValid()) {
         ui_->label->loadDetections({});
@@ -507,33 +425,6 @@ void MainWindow::keyPressEvent(QKeyEvent* e) {
         return;
     }
 
-    switch (e->key()) {
-    case Qt::Key_Q:
-        emit sigPrevRequested();
-        e->accept();
-        return;
-    case Qt::Key_E:
-        emit sigNextRequested();
-        e->accept();
-        return;
-    case Qt::Key_H:
-        emit sigHistEqRequested();
-        e->accept();
-        return;
-    case Qt::Key_Delete:
-        emit sigDeleteRequested();
-        e->accept();
-        return;
-    case Qt::Key_Space:
-        emit sigSmartAnnotateRequested();
-        e->accept();
-        return;
-    case Qt::Key_F1:
-        emit sigSettingsRequested();
-        e->accept();
-        return;
-    default: emit sigKeyCommand(QKeySequence(e->key()).toString()); break;
-    }
     QMainWindow::keyPressEvent(e);
 }
 
@@ -576,18 +467,28 @@ static QAction* ensureAction(QAction* act, const QKeySequence& ks, const QString
 }
 
 void MainWindow::setupActions() {
-    ensureAction(ui_->actionOpen, QKeySequence::Open, tr("Open Folder"));
-    ensureAction(ui_->actionSave, QKeySequence::Save, tr("Save Labels"));
-    ensureAction(ui_->actionPrev, QKeySequence(Qt::Key_Q), tr("Previous (Q)"));
-    ensureAction(ui_->actionNext, QKeySequence(Qt::Key_E), tr("Next (E)"));
-    ensureAction(ui_->actionHistEq, QKeySequence(Qt::Key_H), tr("Histogram Equalize (H)"));
-    ensureAction(ui_->actionDelete, QKeySequence::Delete, tr("Delete"));
-    ensureAction(ui_->actionSmart, QKeySequence(Qt::Key_Space), tr("Smart Annotate (Space)"));
+    ensureAction(ui_->actionOpen, {}, tr("Open Folder"));
+    ensureAction(ui_->actionSave, {}, tr("Save Labels"));
+    ensureAction(ui_->actionPrev, {}, tr("Previous Image"));
+    ensureAction(ui_->actionNext, {}, tr("Next Image"));
+    ensureAction(ui_->actionHistEq, {}, tr("Histogram Equalize"));
+    ensureAction(ui_->actionDelete, {}, tr("Delete Image"));
+    ensureAction(ui_->actionSmart, {}, tr("Smart Annotate"));
     ensureAction(ui_->actionSettings, {}, tr("Settings"));
-    ensureAction(ui_->actionStas, QKeySequence(Qt::Key_F1), tr("Get STAS."));
+    ensureAction(ui_->actionStas, {}, tr("Get STAS."));
     ensureAction(ui_->actionFilter, {}, tr("按 Label 类型筛选图片"));
-    ensureAction(ui_->actionHelp, {}, tr("查看当前快捷键设置"));
+    ensureAction(ui_->actionHelp, {}, tr("查看标签格式帮助"));
     ensureAction(ui_->actionAbout, {}, tr("查看当前版本信息"));
+
+    undoAction_ = new QAction(tr("撤销"), this);
+    redoAction_ = new QAction(tr("重做"), this);
+    undoAction_->setToolTip(tr("撤销上一次标注编辑"));
+    redoAction_->setToolTip(tr("重做上一次标注编辑"));
+    undoAction_->setEnabled(false);
+    redoAction_->setEnabled(false);
+    ui_->menuEdit->insertAction(ui_->actionPrev, undoAction_);
+    ui_->menuEdit->insertAction(ui_->actionPrev, redoAction_);
+    ui_->menuEdit->insertSeparator(ui_->actionPrev);
 
     connect(ui_->actionOpen, &QAction::triggered, this, &MainWindow::sigOpenFolderRequested);
     connect(ui_->actionSave, &QAction::triggered, this, &MainWindow::sigSaveRequested);
@@ -601,6 +502,39 @@ void MainWindow::setupActions() {
     connect(ui_->actionFilter, &QAction::triggered, this, &MainWindow::sigFilterRequested);
     connect(ui_->actionHelp, &QAction::triggered, this, &MainWindow::showHelpDialog);
     connect(ui_->actionAbout, &QAction::triggered, this, &MainWindow::showAboutDialog);
+    connect(undoAction_, &QAction::triggered, ui_->label, &ImageCanvas::undo);
+    connect(redoAction_, &QAction::triggered, ui_->label, &ImageCanvas::redo);
+    connect(
+        ui_->label, &ImageCanvas::historyAvailabilityChanged, this,
+        [this](bool canUndo, bool canRedo) {
+            undoAction_->setEnabled(canUndo);
+            redoAction_->setEnabled(canRedo);
+        });
+
+    auto& keyboard = labelmaster::util::KeyboardManager::instance();
+    connect(&keyboard, &labelmaster::util::KeyboardManager::shortcutChanged, this, [this] {
+        applyKeyboardShortcuts();
+    });
+    applyKeyboardShortcuts();
+}
+
+void MainWindow::applyKeyboardShortcuts() {
+    using labelmaster::util::KeyboardAction;
+    const auto& keyboard = labelmaster::util::KeyboardManager::instance();
+    keyboard.applyToAction(ui_->actionOpen, KeyboardAction::OpenFolder);
+    keyboard.applyToAction(ui_->actionSave, KeyboardAction::Save);
+    keyboard.applyToAction(ui_->actionPrev, KeyboardAction::Previous);
+    keyboard.applyToAction(ui_->actionNext, KeyboardAction::Next);
+    keyboard.applyToAction(ui_->actionSmart, KeyboardAction::SmartAnnotate);
+    keyboard.applyToAction(ui_->actionHistEq, KeyboardAction::HistogramEq);
+    keyboard.applyToAction(ui_->actionDelete, KeyboardAction::Delete);
+    keyboard.applyToAction(ui_->actionSettings, KeyboardAction::Settings);
+    keyboard.applyToAction(ui_->actionStas, KeyboardAction::Statistics);
+    keyboard.applyToAction(ui_->actionFilter, KeyboardAction::Filter);
+    keyboard.applyToAction(ui_->actionHelp, KeyboardAction::Help);
+    keyboard.applyToAction(ui_->actionAbout, KeyboardAction::About);
+    keyboard.applyToAction(undoAction_, KeyboardAction::Undo);
+    keyboard.applyToAction(redoAction_, KeyboardAction::Redo);
 }
 
 void MainWindow::wireButtonsToActions() {

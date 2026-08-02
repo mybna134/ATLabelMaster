@@ -1,27 +1,34 @@
 #include "settings_dialog.hpp"
 #include "controller/settings.hpp"
+#include "ui/pixel_widgets/theme_manager.hpp"
 #include "ui_settings_dialog.h"
 #include "util/id_convert.hpp"
-#include "ui/pixel_widgets/theme_manager.hpp"
+#include <QFrame>
+#include <QGridLayout>
+#include <QHBoxLayout>
+#include <QHeaderView>
+#include <QKeySequenceEdit>
+#include <QLabel>
+#include <QLayoutItem>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QTabWidget>
+#include <QTableWidget>
+#include <QVBoxLayout>
 #include <qcombobox.h>
 #include <qdir.h>
 #include <qfile.h>
 #include <qfiledialog.h>
 #include <qfileinfo.h>
-#include <QFrame>
-#include <QGridLayout>
-#include <QLayoutItem>
-#include <QScrollArea>
 #include <qglobal.h>
-#include <qnamespace.h>
 #include <qmessagebox.h>
+#include <qnamespace.h>
 #include <qobject.h>
 #include <qplaintextedit.h>
 #include <qvariant.h>
 #include <qwidget.h>
-#include <QVBoxLayout>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
-#include <QStringConverter>
+# include <QStringConverter>
 #endif
 #include <QTextStream>
 using namespace ui;
@@ -56,13 +63,13 @@ void normalizeBehaviorGroup(Ui::SettingsDialog* ui) {
     behaviorLayout->addWidget(ui->auto_enhance_checkbox, 1, 1, 1, 2);
 }
 
-void wrapSettingsInScrollArea(QDialog* dialog, Ui::SettingsDialog* ui) {
+QTabWidget* setupSettingsTabs(QDialog* dialog, Ui::SettingsDialog* ui) {
     if (!dialog || !ui)
-        return;
+        return nullptr;
 
     auto* rootLayout = qobject_cast<QVBoxLayout*>(dialog->layout());
     if (!rootLayout)
-        return;
+        return nullptr;
 
     auto* scrollContent = new QWidget(dialog);
     auto* contentLayout = new QVBoxLayout(scrollContent);
@@ -94,10 +101,15 @@ void wrapSettingsInScrollArea(QDialog* dialog, Ui::SettingsDialog* ui) {
     scrollArea->setFrameShape(QFrame::NoFrame);
     scrollArea->setWidget(scrollContent);
 
-    rootLayout->addWidget(scrollArea, 1);
+    auto* tabs = new QTabWidget(dialog);
+    tabs->setObjectName(QStringLiteral("settings_tabs"));
+    tabs->addTab(scrollArea, QObject::tr("常规"));
+
+    rootLayout->addWidget(tabs, 1);
     rootLayout->addWidget(ui->buttonBox);
-    dialog->setMinimumSize(480, 520);
-    dialog->resize(560, 720);
+    dialog->setMinimumSize(620, 560);
+    dialog->resize(760, 720);
+    return tabs;
 }
 
 } // namespace
@@ -107,8 +119,9 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     , ui_(new Ui::SettingsDialog) {
     ui_->setupUi(this);
     normalizeBehaviorGroup(ui_);
-    wrapSettingsInScrollArea(this, ui_);
-    this->setWindowTitle("Settings");
+    QTabWidget* tabs = setupSettingsTabs(this, ui_);
+    setupShortcutTab(tabs);
+    this->setWindowTitle(tr("设置"));
     this->ui_->dataset_dir_edit->setText(controller::AppSettings::instance().saveDir());
     this->ui_->last_img_dir_edit->setText(controller::AppSettings::instance().lastImageDir());
     this->ui_->last_img_path_edit->setText(controller::AppSettings::instance().lastImagePath());
@@ -134,8 +147,9 @@ SettingsDialog::SettingsDialog(QWidget* parent)
 
     // Set current theme
     QString currentTheme = controller::AppSettings::instance().theme();
-    int themeIndex = ui_->theme_combo->findData(currentTheme);
-    if (themeIndex < 0) themeIndex = 0;
+    int themeIndex       = ui_->theme_combo->findData(currentTheme);
+    if (themeIndex < 0)
+        themeIndex = 0;
     ui_->theme_combo->setCurrentIndex(themeIndex);
     update();
     connect(
@@ -155,8 +169,170 @@ SettingsDialog::SettingsDialog(QWidget* parent)
     connect(this->ui_->fix_roi_checkbox, &QCheckBox::toggled, this, &SettingsDialog::setFixedRoi);
     connect(this->ui_->roi_h_spin, &QSpinBox::editingFinished, this, &SettingsDialog::setRoiH);
     connect(this->ui_->roi_w_spin, &QSpinBox::editingFinished, this, &SettingsDialog::setRoiW);
-    connect(this->ui_->theme_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &SettingsDialog::setTheme);
+    connect(
+        this->ui_->theme_combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+        &SettingsDialog::setTheme);
+}
 
+SettingsDialog::~SettingsDialog() { delete ui_; }
+
+void SettingsDialog::setupShortcutTab(QTabWidget* tabs) {
+    if (!tabs)
+        return;
+
+    auto* page   = new QWidget(tabs);
+    auto* layout = new QVBoxLayout(page);
+    auto* description = new QLabel(
+        tr("单击快捷键框后按下新键位；留空可禁用该操作。所有键位必须唯一。\n"
+           "四点可见性键：单按在可见/不可见间切换，连续双按设为不在范围内。"),
+        page);
+    description->setWordWrap(true);
+    layout->addWidget(description);
+
+    shortcutTable_       = new QTableWidget(page);
+    const auto& keyboard = labelmaster::util::KeyboardManager::instance();
+    const QList<labelmaster::util::KeyboardAction> actions = keyboard.allActions();
+    shortcutTable_->setColumnCount(3);
+    shortcutTable_->setRowCount(actions.size());
+    shortcutTable_->setHorizontalHeaderLabels({tr("范围"), tr("操作"), tr("键位")});
+    shortcutTable_->setAlternatingRowColors(true);
+    shortcutTable_->setSelectionMode(QAbstractItemView::NoSelection);
+    shortcutTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    shortcutTable_->verticalHeader()->setVisible(false);
+    shortcutTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    shortcutTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    shortcutTable_->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+
+    shortcutEditors_.reserve(actions.size());
+    for (int row = 0; row < actions.size(); ++row) {
+        const auto action = actions.at(row);
+        auto* scopeItem   = new QTableWidgetItem(keyboard.scopeName(action));
+        auto* actionItem  = new QTableWidgetItem(keyboard.actionName(action));
+        scopeItem->setFlags(scopeItem->flags() & ~Qt::ItemIsEditable);
+        actionItem->setFlags(actionItem->flags() & ~Qt::ItemIsEditable);
+        shortcutTable_->setItem(row, 0, scopeItem);
+        shortcutTable_->setItem(row, 1, actionItem);
+
+        auto* editorContainer = new QWidget(shortcutTable_);
+        auto* editorLayout    = new QHBoxLayout(editorContainer);
+        editorLayout->setContentsMargins(0, 0, 0, 0);
+        editorLayout->setSpacing(4);
+        auto* editor = new QKeySequenceEdit(keyboard.shortcut(action), editorContainer);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+        editor->setMaximumSequenceLength(1);
+#endif
+        editor->setToolTip(tr("按下新键位，或使用右侧按钮清除"));
+        auto* clearButton = new QPushButton(QStringLiteral("×"), editorContainer);
+        clearButton->setFixedWidth(28);
+        clearButton->setToolTip(tr("清除此键位"));
+        connect(clearButton, &QPushButton::clicked, editor, &QKeySequenceEdit::clear);
+        editorLayout->addWidget(editor, 1);
+        editorLayout->addWidget(clearButton);
+        shortcutTable_->setCellWidget(row, 2, editorContainer);
+        shortcutEditors_.append({action, editor});
+        connect(editor, &QKeySequenceEdit::keySequenceChanged, this, [this] {
+            validateShortcutConflicts();
+        });
+    }
+
+    auto* footer           = new QHBoxLayout;
+    shortcutConflictLabel_ = new QLabel(page);
+    shortcutConflictLabel_->setWordWrap(true);
+    auto* resetButton = new QPushButton(tr("恢复默认键位"), page);
+    connect(resetButton, &QPushButton::clicked, this, &SettingsDialog::resetShortcutEditors);
+    footer->addWidget(shortcutConflictLabel_, 1);
+    footer->addWidget(resetButton);
+
+    layout->addWidget(shortcutTable_, 1);
+    layout->addLayout(footer);
+    tabs->addTab(page, tr("键位设置"));
+    validateShortcutConflicts();
+}
+
+bool SettingsDialog::validateShortcutConflicts(QString* error) {
+    QHash<QString, QVector<int>> rowsBySequence;
+    for (const ShortcutEditor& row : shortcutEditors_)
+        row.editor->setStyleSheet(QString());
+
+    for (int row = 0; row < shortcutEditors_.size(); ++row) {
+        QKeySequenceEdit* editor    = shortcutEditors_[row].editor;
+        const QKeySequence sequence = editor->keySequence();
+        if (sequence.isEmpty())
+            continue;
+        if (sequence.count() != 1) {
+            const QString message = tr("每个操作只能设置一个按键或组合键");
+            if (error)
+                *error = message;
+            editor->setStyleSheet(
+                QStringLiteral("QKeySequenceEdit { border: 2px solid #d9534f; }"));
+            if (shortcutConflictLabel_) {
+                shortcutConflictLabel_->setText(message);
+                shortcutConflictLabel_->setStyleSheet(QStringLiteral("color: #d9534f;"));
+            }
+            if (auto* ok = ui_->buttonBox->button(QDialogButtonBox::Ok))
+                ok->setEnabled(false);
+            return false;
+        }
+        rowsBySequence[labelmaster::util::KeyboardManager::shortcutIdentity(sequence)].append(row);
+    }
+
+    QStringList conflicts;
+    for (auto it = rowsBySequence.cbegin(); it != rowsBySequence.cend(); ++it) {
+        if (it.value().size() < 2)
+            continue;
+        QStringList actionNames;
+        for (int row : it.value()) {
+            shortcutEditors_[row].editor->setStyleSheet(
+                QStringLiteral("QKeySequenceEdit { border: 2px solid #d9534f; }"));
+            actionNames.append(
+                labelmaster::util::KeyboardManager::instance().actionName(
+                    shortcutEditors_[row].action));
+        }
+        const QKeySequence sequence =
+            QKeySequence::fromString(it.key(), QKeySequence::PortableText);
+        conflicts.append(tr("%1：%2").arg(
+            sequence.toString(QKeySequence::NativeText), actionNames.join(tr("、"))));
+    }
+
+    const bool valid = conflicts.isEmpty();
+    if (shortcutConflictLabel_) {
+        shortcutConflictLabel_->setText(
+            valid ? tr("未检测到键位冲突") : tr("键位冲突：%1").arg(conflicts.join(tr("；"))));
+        shortcutConflictLabel_->setStyleSheet(
+            valid ? QStringLiteral("color: #4c9a2a;") : QStringLiteral("color: #d9534f;"));
+    }
+    if (auto* ok = ui_->buttonBox->button(QDialogButtonBox::Ok))
+        ok->setEnabled(valid);
+    if (!valid && error)
+        *error = tr("存在重复键位：%1").arg(conflicts.join(tr("；")));
+    return valid;
+}
+
+void SettingsDialog::resetShortcutEditors() {
+    const auto& keyboard = labelmaster::util::KeyboardManager::instance();
+    for (const ShortcutEditor& row : shortcutEditors_)
+        row.editor->setKeySequence(keyboard.defaultShortcut(row.action));
+    validateShortcutConflicts();
+}
+
+void SettingsDialog::accept() {
+    QString error;
+    if (!validateShortcutConflicts(&error)) {
+        QMessageBox::warning(this, tr("键位冲突"), error);
+        return;
+    }
+
+    QHash<labelmaster::util::KeyboardAction, QKeySequence> shortcuts;
+    for (const ShortcutEditor& row : shortcutEditors_)
+        shortcuts.insert(row.action, row.editor->keySequence());
+
+    auto& keyboard = labelmaster::util::KeyboardManager::instance();
+    if (!keyboard.setShortcuts(shortcuts, &error)) {
+        QMessageBox::warning(this, tr("无法保存键位"), error);
+        return;
+    }
+    keyboard.save();
+    QDialog::accept();
 }
 void SettingsDialog::SaveDirEditUpdate() {
     const QString dir = QFileDialog::getExistingDirectory(
@@ -230,7 +406,7 @@ SettingsDialog::LabelInfo SettingsDialog::getLabelFromCombos(
     // 颜色: All(-1), Blue(0), Red(1), Gray(2), Purple(3)
     QString colorText = colorCombo->currentText();
     if (colorText == "All") {
-        info.colorId = -1;  // -1 表示匹配所有颜色
+        info.colorId = -1; // -1 表示匹配所有颜色
     } else {
         info.colorId = IdConvert::colorToken2Id(colorText);
     }
@@ -238,24 +414,24 @@ SettingsDialog::LabelInfo SettingsDialog::getLabelFromCombos(
     // 大小: All(-1), Small(0), Big(1)
     QString sizeText = sizeCombo->currentText();
     if (sizeText == "All") {
-        info.size = -1;  // -1 表示匹配所有大小
+        info.size = -1; // -1 表示匹配所有大小
     } else {
         info.size = (sizeText == "Small") ? 0 : 1;
     }
 
     // 类别: G(0), 1-5(1-5), O(6), B(7)
     QString classText = classCombo->currentText();
-    info.classId = IdConvert::classToken2Id(IdConvert::normalizeClasslToken(classText));
+    info.classId      = IdConvert::classToken2Id(IdConvert::normalizeClasslToken(classText));
 
     return info;
 }
 
 void SettingsDialog::performBatchReplace() {
     // 获取源和目标标签
-    LabelInfo src = getLabelFromCombos(
-        ui_->src_color_combo, ui_->src_size_combo, ui_->src_class_combo);
-    LabelInfo dst = getLabelFromCombos(
-        ui_->dst_color_combo, ui_->dst_size_combo, ui_->dst_class_combo);
+    LabelInfo src =
+        getLabelFromCombos(ui_->src_color_combo, ui_->src_size_combo, ui_->src_class_combo);
+    LabelInfo dst =
+        getLabelFromCombos(ui_->dst_color_combo, ui_->dst_size_combo, ui_->dst_class_combo);
 
     // 获取标签保存目录
     QString labelDir = controller::AppSettings::instance().saveDir();
@@ -269,8 +445,8 @@ void SettingsDialog::performBatchReplace() {
     if (!dir.isAbsolute()) {
         // 如果是相对路径，尝试基于当前目录转换
         QString currentDir = QDir::currentPath();
-        QString absPath = QDir::cleanPath(currentDir + "/" + labelDir);
-        dir = QDir(absPath);
+        QString absPath    = QDir::cleanPath(currentDir + "/" + labelDir);
+        dir                = QDir(absPath);
 
         // 如果目录仍然不存在，尝试基于上次图片目录
         if (!dir.exists()) {
@@ -279,7 +455,7 @@ void SettingsDialog::performBatchReplace() {
                 QFileInfo imgFi(lastImgDir);
                 if (imgFi.dir().exists()) {
                     absPath = QDir::cleanPath(imgFi.absolutePath() + "/../" + labelDir);
-                    dir = QDir(absPath);
+                    dir     = QDir(absPath);
                 }
             }
         }
@@ -287,9 +463,12 @@ void SettingsDialog::performBatchReplace() {
 
     if (!dir.exists()) {
         ui_->batch_result_text->setPlainText(
-            "错误: 标签目录不存在: " + labelDir + "\n"
-            "解析路径为: " + dir.absolutePath() + "\n"
-            "请检查设置中的保存目录是否正确。");
+            "错误: 标签目录不存在: " + labelDir
+            + "\n"
+              "解析路径为: "
+            + dir.absolutePath()
+            + "\n"
+              "请检查设置中的保存目录是否正确。");
         return;
     }
 
@@ -299,8 +478,8 @@ void SettingsDialog::performBatchReplace() {
     dir.setNameFilters(filters);
     QFileInfoList fileList = dir.entryInfoList(QDir::Files | QDir::Readable);
 
-    int totalFiles = 0;
-    int modifiedFiles = 0;
+    int totalFiles     = 0;
+    int modifiedFiles  = 0;
     int replacedLabels = 0;
     QStringList modifiedFileNames;
 
@@ -321,12 +500,12 @@ void SettingsDialog::performBatchReplace() {
 #endif
 
         QStringList newLines;
-        bool fileModified = false;
+        bool fileModified        = false;
         int labelsReplacedInFile = 0;
 
         while (!in.atEnd()) {
             QString line = in.readLine();
-            int hashIdx = line.indexOf('#');
+            int hashIdx  = line.indexOf('#');
             if (hashIdx >= 0) {
                 // Keep comments as-is
                 if (hashIdx == 0) {
@@ -351,9 +530,9 @@ void SettingsDialog::performBatchReplace() {
                 continue;
             }
 
-            bool ok = true;
+            bool ok     = true;
             int colorId = parts[0].toInt(&ok);
-            int size = parts[1].toInt(&ok);
+            int size    = parts[1].toInt(&ok);
             int classId = parts[2].toInt(&ok);
 
             if (!ok) {
@@ -363,32 +542,47 @@ void SettingsDialog::performBatchReplace() {
 
             // 检查是否匹配源标签 (-1 表示通配符，匹配任意值)
             bool colorMatch = (src.colorId == -1 || colorId == src.colorId);
-            bool sizeMatch = (src.size == -1 || size == src.size);
+            bool sizeMatch  = (src.size == -1 || size == src.size);
             bool classMatch = (classId == src.classId);
 
             if (colorMatch && sizeMatch && classMatch) {
                 // 替换为目标标签
                 int dstColorId = (dst.colorId == -1) ? colorId : dst.colorId;
-                int dstSize = (dst.size == -1) ? size : dst.size;
+                int dstSize    = (dst.size == -1) ? size : dst.size;
 
                 // 根据原始格式输出
                 if (parts.size() == 11) {
                     // 11字段格式: color size class x0 y0 x1 y1 x2 y2 x3 y3
                     line = QString("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11")
-                        .arg(dstColorId)
-                        .arg(dstSize)
-                        .arg(dst.classId)
-                        .arg(parts[3]).arg(parts[4]).arg(parts[5]).arg(parts[6])
-                        .arg(parts[7]).arg(parts[8]).arg(parts[9]).arg(parts[10]);
+                               .arg(dstColorId)
+                               .arg(dstSize)
+                               .arg(dst.classId)
+                               .arg(parts[3])
+                               .arg(parts[4])
+                               .arg(parts[5])
+                               .arg(parts[6])
+                               .arg(parts[7])
+                               .arg(parts[8])
+                               .arg(parts[9])
+                               .arg(parts[10]);
                 } else {
                     // 15字段格式: color size class x y w h x0 y0 x1 y1 x2 y2 x3 y3
                     line = QString("%1 %2 %3 %4 %5 %6 %7 %8 %9 %10 %11 %12 %13 %14 %15")
-                        .arg(dstColorId)
-                        .arg(dstSize)
-                        .arg(dst.classId)
-                        .arg(parts[3]).arg(parts[4]).arg(parts[5]).arg(parts[6])  // x y w h
-                        .arg(parts[7]).arg(parts[8]).arg(parts[9]).arg(parts[10]) // x0 y0 x1 y1
-                        .arg(parts[11]).arg(parts[12]).arg(parts[13]).arg(parts[14]); // x2 y2 x3 y3
+                               .arg(dstColorId)
+                               .arg(dstSize)
+                               .arg(dst.classId)
+                               .arg(parts[3])
+                               .arg(parts[4])
+                               .arg(parts[5])
+                               .arg(parts[6])   // x y w h
+                               .arg(parts[7])
+                               .arg(parts[8])
+                               .arg(parts[9])
+                               .arg(parts[10])  // x0 y0 x1 y1
+                               .arg(parts[11])
+                               .arg(parts[12])
+                               .arg(parts[13])
+                               .arg(parts[14]); // x2 y2 x3 y3
                 }
                 fileModified = true;
                 labelsReplacedInFile++;
@@ -424,22 +618,20 @@ void SettingsDialog::performBatchReplace() {
 
     // 生成统计报告
     QString srcDesc = QString("颜色=%1, 大小=%2, 类别=%3")
-        .arg(ui_->src_color_combo->currentText())
-        .arg(ui_->src_size_combo->currentText())
-        .arg(ui_->src_class_combo->currentText());
+                          .arg(ui_->src_color_combo->currentText())
+                          .arg(ui_->src_size_combo->currentText())
+                          .arg(ui_->src_class_combo->currentText());
     QString dstDesc = QString("颜色=%1, 大小=%2, 类别=%3")
-        .arg(ui_->dst_color_combo->currentText())
-        .arg(ui_->dst_size_combo->currentText())
-        .arg(ui_->dst_class_combo->currentText());
+                          .arg(ui_->dst_color_combo->currentText())
+                          .arg(ui_->dst_size_combo->currentText())
+                          .arg(ui_->dst_class_combo->currentText());
 
     QString report = QString("=== 批量替换统计 ===\n\n")
-        + QString("标签目录: %1\n\n").arg(dir.absolutePath())
-        + QString("替换规则:\n")
-        + QString("  源: %1\n").arg(srcDesc)
-        + QString("  目标: %1\n\n").arg(dstDesc)
-        + QString("扫描文件数: %1\n").arg(totalFiles)
-        + QString("修改文件数: %1\n").arg(modifiedFiles)
-        + QString("替换标签数: %1\n\n").arg(replacedLabels);
+                   + QString("标签目录: %1\n\n").arg(dir.absolutePath()) + QString("替换规则:\n")
+                   + QString("  源: %1\n").arg(srcDesc) + QString("  目标: %1\n\n").arg(dstDesc)
+                   + QString("扫描文件数: %1\n").arg(totalFiles)
+                   + QString("修改文件数: %1\n").arg(modifiedFiles)
+                   + QString("替换标签数: %1\n\n").arg(replacedLabels);
 
     if (!modifiedFileNames.isEmpty() && modifiedFileNames.size() <= 50) {
         report += "已修改的文件:\n";

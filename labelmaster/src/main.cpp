@@ -20,6 +20,10 @@
 #define LABELMASTER_VERSION "1.2.2"
 #endif
 
+#ifndef LABELMASTER_ASSETS_DIR
+#define LABELMASTER_ASSETS_DIR ""
+#endif
+
 int main(int argc, char* argv[]) {
     // 1) 初始化应用配置系统(在 QApplication 之前，否则会Unknown Organization)
     // 2) 安装 Qt 的全局消息处理器，尽早捕获日志
@@ -32,8 +36,12 @@ int main(int argc, char* argv[]) {
     dir.cdUp();
     controller::AppSettings::instance().setassetsDir(dir.absolutePath() + "/Resources");
 #else
+    const QString installedAssetsDir = QStringLiteral(LABELMASTER_ASSETS_DIR);
+    const QString bundledAssetsDir = QCoreApplication::applicationDirPath() + "/assets";
     controller::AppSettings::instance().setassetsDir(
-        QCoreApplication::applicationDirPath() + "/assets");
+        !installedAssetsDir.isEmpty() && QDir(installedAssetsDir).exists()
+            ? installedAssetsDir
+            : bundledAssetsDir);
 #endif
     logger::Logger::installQtHandler();
 

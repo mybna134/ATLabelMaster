@@ -264,64 +264,6 @@ jobs:
           rm -rf "${DIST_DIR}"
           mkdir -p "${DIST_DIR}/deb" "${DIST_DIR}/flatpak" build/ci-packages
 
-          copy_lib() {
-            local src="$1"
-            local dest="${FLATPAK_BUILD_DIR}/files/lib"
-            local current="$src"
-            local next
-
-            while [ -L "$current" ]; do
-              cp -a "$current" "$dest/"
-              next="$(readlink "$current")"
-              case "$next" in
-                /*) current="$next" ;;
-                *) current="$(dirname "$current")/$next" ;;
-              esac
-            done
-
-            if [ -f "$current" ]; then
-              cp -a "$current" "$dest/"
-            fi
-          }
-
-          copy_lib_deps() {
-            local target="$1"
-            local lib
-
-            while IFS= read -r lib; do
-              case "$lib" in
-                /lib64/ld-linux-*|*/libc.so.*|*/libm.so.*|*/libpthread.so.*|*/libdl.so.*|*/librt.so.*|*/libresolv.so.*|*/libnss_*.so.*|*/libutil.so.*|*/libanl.so.*)
-                  continue
-                  ;;
-              esac
-
-              if [ -f "$lib" ]; then
-                copy_lib "$lib"
-              fi
-            done < <(ldd "$target" | awk '/=> \// { print $3 } /^\/.*\(/ { print $1 }')
-          }
-
-          copy_openvino_runtime() {
-            local openvino_dir
-            local openvino_lib
-            local openvino_name
-
-            # The app compiles ONNX/IR models for CPU only; skip unused GPU/NPU plugins
-            # and non-ONNX frontends to keep Flatpak bundling fast.
-            for openvino_dir in /usr/lib /usr/lib/x86_64-linux-gnu /opt/intel/openvino*; do
-              [ -d "$openvino_dir" ] || continue
-              while IFS= read -r openvino_lib; do
-                openvino_name="$(basename "$openvino_lib")"
-                case "$openvino_name" in
-                  libopenvino.so*|libopenvino_c.so*|libopenvino_ir_frontend.so*|libopenvino_onnx_frontend.so*|libopenvino_intel_cpu_plugin.so)
-                    copy_lib "$openvino_lib"
-                    copy_lib_deps "$openvino_lib"
-                    ;;
-                esac
-              done < <(find "$openvino_dir" \( -type f -o -type l \) -name 'libopenvino*.so*' 2>/dev/null)
-            done
-          }
-
           build_deb() {
             local version="$1"
             local arch="amd64"
@@ -341,7 +283,6 @@ jobs:
             cmake --build "$build_dir" --parallel "$(nproc)"
             DESTDIR="${PWD}/${pkg_dir}" cmake --install "$build_dir"
 
-            cp -r assets "$pkg_dir/usr/bin/assets"
             cat > "$pkg_dir/usr/bin/labelmaster" <<'EOF'
           #!/bin/sh
           exec /usr/bin/LabelMaster "$@"
@@ -390,104 +331,58 @@ jobs:
 
           build_flatpak() {
             local version="$1"
-            local pkg_dir="build/ci-packages/labelmaster_${version}_amd64"
             local build_dir="build/ci-packages/flatpak-build-${version}"
             local repo_dir="build/ci-packages/flatpak-repo-${version}"
+            local manifest="packaging/flatpak/.ci-${version}.yml"
             local out_file="${DIST_DIR}/flatpak/labelmaster_${version}_x86_64.flatpak"
-
-            if [ ! -x "$pkg_dir/usr/bin/LabelMaster" ]; then
-              echo "Missing binary for Flatpak: $pkg_dir/usr/bin/LabelMaster" >&2
-              exit 1
-            fi
 
             flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
             flatpak install --user -y --noninteractive flathub \
               "${FLATPAK_RUNTIME}//${FLATPAK_RUNTIME_VERSION}" \
               "${FLATPAK_SDK}//${FLATPAK_RUNTIME_VERSION}"
 
+            desktop-file-validate "packaging/flatpak/${APP_ID}.desktop"
+            appstreamcli validate --no-net "packaging/flatpak/${APP_ID}.metainfo.xml"
+
+            cp "packaging/flatpak/${APP_ID}.yml" "$manifest"
+            sed -i -E \
+              "s#-DLABELMASTER_APP_VERSION=[^[:space:]]+#-DLABELMASTER_APP_VERSION=${version}#" \
+              "$manifest"
+
             rm -rf "$build_dir" "$repo_dir" "$out_file"
-            flatpak build-init --arch=x86_64 "$build_dir" "$APP_ID" "$FLATPAK_SDK" "$FLATPAK_RUNTIME" "$FLATPAK_RUNTIME_VERSION"
+            flatpak-builder \
+              --user \
+              --assumeyes \
+              --disable-rofiles-fuse \
+              --force-clean \
+              --install-deps-from=flathub \
+              --default-branch="$version" \
+              --repo="$repo_dir" \
+              "$build_dir" \
+              "$manifest"
 
-            install -d \
-              "$build_dir/files/bin" \
-              "$build_dir/files/lib" \
-              "$build_dir/files/plugins" \
-              "$build_dir/files/share/applications" \
-              "$build_dir/files/share/icons/hicolor/scalable/apps" \
-              "$build_dir/files/share/metainfo"
-
-            cp "$pkg_dir/usr/bin/LabelMaster" "$build_dir/files/bin/LabelMaster"
-            cp -r assets "$build_dir/files/bin/assets"
-
-            cat > "$build_dir/files/bin/labelmaster" <<'EOF'
-          #!/bin/sh
-          export LD_LIBRARY_PATH=/app/lib:${LD_LIBRARY_PATH:-}
-          export QT_PLUGIN_PATH=/app/plugins
-          export QT_QPA_PLATFORM_PLUGIN_PATH=/app/plugins/platforms
-          exec /app/bin/LabelMaster "$@"
-          EOF
-            chmod 755 "$build_dir/files/bin/labelmaster"
-
-            sed \
-              -e "s/^Exec=.*/Exec=labelmaster %F/" \
-              -e "s/^Icon=.*/Icon=${APP_ID}/" \
-              packaging/common/labelmaster.desktop \
-              > "$build_dir/files/share/applications/${APP_ID}.desktop"
-            cp assets/icons/1.svg "$build_dir/files/share/icons/hicolor/scalable/apps/${APP_ID}.svg"
-
-            release_date="$(date +%F)"
-            cat > "$build_dir/files/share/metainfo/${APP_ID}.metainfo.xml" <<EOF
-          <?xml version="1.0" encoding="UTF-8"?>
-          <component type="desktop-application">
-            <id>${APP_ID}</id>
-            <name>ATLabelMaster</name>
-            <summary>RoboMaster armor annotation tool</summary>
-            <metadata_license>MIT</metadata_license>
-            <project_license>MIT</project_license>
-            <description>
-              <p>ATLabelMaster is an annotation tool for RoboMaster armor plate datasets.</p>
-            </description>
-            <launchable type="desktop-id">${APP_ID}.desktop</launchable>
-            <url type="homepage">https://github.com/mybna134/ATLabelMaster</url>
-            <content_rating type="oars-1.1"/>
-            <releases>
-              <release version="${version}" date="${release_date}"/>
-            </releases>
-          </component>
-          EOF
-
-            desktop-file-validate "$build_dir/files/share/applications/${APP_ID}.desktop"
-            appstreamcli validate --no-net "$build_dir/files/share/metainfo/${APP_ID}.metainfo.xml"
-
-            FLATPAK_BUILD_DIR="$build_dir"
-            copy_lib_deps "$build_dir/files/bin/LabelMaster"
-            copy_openvino_runtime
-
-            qt_plugin_dir="$(qtpaths6 --plugin-dir 2>/dev/null || echo /usr/lib/x86_64-linux-gnu/qt6/plugins)"
-            for plugin_dir in iconengines imageformats platforms platforminputcontexts xcbglintegrations wayland-decoration-client wayland-graphics-integration-client wayland-shell-integration; do
-              if [ -d "$qt_plugin_dir/$plugin_dir" ]; then
-                cp -a "$qt_plugin_dir/$plugin_dir" "$build_dir/files/plugins/"
-                while IFS= read -r plugin; do
-                  copy_lib_deps "$plugin"
-                done < <(find "$qt_plugin_dir/$plugin_dir" -type f -name '*.so')
+            flatpak-builder --run "$build_dir" "$manifest" sh -eu -c '
+              test "$QT_QPA_PLATFORMTHEME" = kde
+              test -f /usr/lib/plugins/platformthemes/KDEPlasmaPlatformTheme6.so
+              if find /app -name "libQt6*.so*" -print -quit | grep -q .; then
+                echo "Qt libraries must come from org.kde.Platform, not /app" >&2
+                exit 1
               fi
-            done
+              if ldd /app/bin/LabelMaster | grep -E "libQt6.*=> /app/"; then
+                echo "LabelMaster is linked to a bundled Qt library" >&2
+                exit 1
+              fi
+              ldd /app/bin/LabelMaster | grep -E "libQt6(Core|Gui|Widgets|Svg).*=> /usr/"
+            '
 
-            flatpak build-finish "$build_dir" \
-              --command=labelmaster \
-              --share=ipc \
-              --socket=x11 \
-              --socket=wayland \
-              --device=dri \
-              --filesystem=home
-
-            flatpak build-export --disable-fsync --arch=x86_64 "$repo_dir" "$build_dir" "$version"
             flatpak build-bundle --arch=x86_64 \
               --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
               "$repo_dir" \
               "$out_file" \
               "$APP_ID" \
               "$version"
+
+            rm -f "$manifest"
           }
 
           build_variant() {

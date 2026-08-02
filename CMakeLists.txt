@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(LabelMaster VERSION 1.2.2 LANGUAGES CXX)
+include(GNUInstallDirs)
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 set(SRC_PATH ${CMAKE_CURRENT_SOURCE_DIR}/labelmaster/src)
@@ -33,6 +35,7 @@ add_executable(${PROJECT_NAME} ${SRC_FILES})
 set(LABELMASTER_APP_VERSION "${PROJECT_VERSION}" CACHE STRING "ATLabelMaster application version")
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     LABELMASTER_VERSION="${LABELMASTER_APP_VERSION}"
+    LABELMASTER_ASSETS_DIR="${CMAKE_INSTALL_FULL_DATADIR}/labelmaster"
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE 
@@ -51,10 +54,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 )
 
 install(TARGETS ${PROJECT_NAME}
-    RUNTIME DESTINATION /usr/bin
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-set(APP_SHARE_DIR /usr/share/labelmaster)
+set(APP_SHARE_DIR "${CMAKE_INSTALL_DATADIR}/labelmaster")
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/resources")
     install(DIRECTORY resources/ DESTINATION ${APP_SHARE_DIR}/resources)
@@ -66,4 +69,22 @@ install(DIRECTORY assets/label/ DESTINATION ${APP_SHARE_DIR}/label)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/models")
     install(DIRECTORY assets/models/ DESTINATION ${APP_SHARE_DIR}/models)
+endif()
+
+option(LABELMASTER_FLATPAK "Install Flatpak desktop integration metadata" OFF)
+if(LABELMASTER_FLATPAK)
+    set(LABELMASTER_FLATPAK_ID "io.github.mybna134.ATLabelMaster")
+
+    install(
+        FILES "packaging/flatpak/${LABELMASTER_FLATPAK_ID}.desktop"
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/applications
+    )
+    install(
+        FILES "packaging/flatpak/${LABELMASTER_FLATPAK_ID}.svg"
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps
+    )
+    install(
+        FILES "packaging/flatpak/${LABELMASTER_FLATPAK_ID}.metainfo.xml"
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo
+    )
 endif()

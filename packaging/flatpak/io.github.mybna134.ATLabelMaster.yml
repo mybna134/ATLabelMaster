@@ -1,0 +1,142 @@
+app-id: io.github.mybna134.ATLabelMaster
+runtime: org.kde.Platform
+runtime-version: "6.10"
+sdk: org.kde.Sdk
+command: LabelMaster
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=home
+  - --filesystem=xdg-config/kdeglobals:ro
+  - --talk-name=com.canonical.AppMenu.Registrar
+  - --talk-name=org.kde.KGlobalSettings
+  - --talk-name=org.kde.kconfig.notify
+  # This plugin and Breeze are supplied by org.kde.Platform under /usr.
+  # Keeping Qt and its plugins in one runtime avoids ABI/plugin mismatches.
+  - --env=QT_QPA_PLATFORMTHEME=kde
+
+cleanup:
+  - /include
+  - /lib/cmake
+  - /lib/pkgconfig
+  - /lib/*.a
+  - /lib/*.la
+  - /lib/libopenvino_paddle_frontend.so*
+  - /lib/libopenvino_pytorch_frontend.so*
+  - /lib/libopenvino_tensorflow_frontend.so*
+  - /lib/libopenvino_tensorflow_lite_frontend.so*
+  - /bin/setup_vars_opencv4.sh
+  - /share/doc
+  - /share/man
+
+modules:
+  - name: eigen
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DBUILD_TESTING=OFF
+      - -DEIGEN_BUILD_DOC=OFF
+      - -DEIGEN_BUILD_PKGCONFIG=ON
+    sources:
+      - type: archive
+        url: https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
+        sha256: 8586084f71f9bde545ee7fa6d00288b264a2b7ac3607b974e54d13e7162c1c72
+
+  - name: oneTBB
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DTBB_TEST=OFF
+      - -DTBB_STRICT=OFF
+    sources:
+      - type: archive
+        url: https://github.com/oneapi-src/oneTBB/archive/refs/tags/v2021.13.0.tar.gz
+        sha256: 3ad5dd08954b39d113dc5b3f8a8dc6dc1fd5250032b7c491eb07aed5c94133e1
+
+  - name: opencv
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DBUILD_LIST=core,imgproc,imgcodecs,highgui,dnn,objdetect
+      - -DBUILD_SHARED_LIBS=ON
+      - -DBUILD_TESTS=OFF
+      - -DBUILD_PERF_TESTS=OFF
+      - -DBUILD_EXAMPLES=OFF
+      - -DBUILD_opencv_apps=OFF
+      - -DBUILD_JAVA=OFF
+      - -DBUILD_opencv_java_bindings_generator=OFF
+      - -DBUILD_opencv_js_bindings_generator=OFF
+      - -DBUILD_opencv_python_bindings_generator=OFF
+      - -DBUILD_opencv_python_tests=OFF
+      - -DWITH_ADE=OFF
+      - -DWITH_FFMPEG=OFF
+      - -DWITH_GSTREAMER=OFF
+      - -DWITH_GTK=OFF
+      - -DWITH_IPP=OFF
+      - -DWITH_OPENCL=OFF
+      - -DWITH_OPENEXR=OFF
+      - -DWITH_QT=OFF
+    sources:
+      - type: archive
+        url: https://github.com/opencv/opencv/archive/refs/tags/4.10.0.tar.gz
+        sha256: b2171af5be6b26f7a06b1229948bbb2bdaa74fcf5cd097e0af6378fce50a6eb9
+
+  - name: openvino
+    buildsystem: simple
+    build-commands:
+      - mkdir -p openvino-root
+      - for archive in *.deb; do ar p "$archive" data.tar.gz | tar -xz -C openvino-root; done
+      - cp -a openvino-root/usr/. /app/
+      - for copyright in openvino-root/usr/share/doc/*/copyright; do package="$(basename "$(dirname "$copyright")")"; install -Dm644 "$copyright" "/app/share/licenses/$package/copyright"; done
+    sources:
+      - type: file
+        url: https://apt.repos.intel.com/openvino/ubuntu22/pool/main/libopenvino-2025.3.0_2025.3.0.19807_amd64.deb
+        sha256: d79d676bd822af5fe50f8072569c48288e991ec680969a5eb486d93e4d8aa3d3
+      - type: file
+        url: https://apt.repos.intel.com/openvino/ubuntu22/pool/main/libopenvino-dev-2025.3.0_2025.3.0.19807_amd64.deb
+        sha256: eb34a1f673b75943c7d2cbcbc25a802c4461432d65c86274d4746fe4ed6c8f9b
+      - type: file
+        url: https://apt.repos.intel.com/openvino/ubuntu22/pool/main/libopenvino-intel-cpu-plugin-2025.3.0_2025.3.0.19807_amd64.deb
+        sha256: a6eb70c17efddbff8cc87e78531b559944f7e5f422f5432ddbf47c51307a202e
+      - type: file
+        url: https://apt.repos.intel.com/openvino/ubuntu22/pool/main/libopenvino-ir-frontend-2025.3.0_2025.3.0.19807_amd64.deb
+        sha256: aba3330b56198077a2a42abf16026529a47c15a1c86b7b1067700217e4f95f66
+      - type: file
+        url: https://apt.repos.intel.com/openvino/ubuntu22/pool/main/libopenvino-onnx-frontend-2025.3.0_2025.3.0.19807_amd64.deb
+        sha256: 4b385f39b60c5b082554655a81fb443a31f01d634129632e8810584b7ae425ca
+      - type: file
+        url: https://apt.repos.intel.com/openvino/ubuntu22/pool/main/libopenvino-paddle-frontend-2025.3.0_2025.3.0.19807_amd64.deb
+        sha256: 6a5101d2791fb606690ff057bdc55d254a16c7dec22ca4b03e447a3780d6c9f9
+      - type: file
+        url: https://apt.repos.intel.com/openvino/ubuntu22/pool/main/libopenvino-pytorch-frontend-2025.3.0_2025.3.0.19807_amd64.deb
+        sha256: 468a584378eeff865d6113d5e621f18e074419d8af8e12be9ea8478144af1914
+      - type: file
+        url: https://apt.repos.intel.com/openvino/ubuntu22/pool/main/libopenvino-tensorflow-frontend-2025.3.0_2025.3.0.19807_amd64.deb
+        sha256: 1f53d880c324db30f3dc3dbbf222d0e716b0d4ea2b1099d4389ea515b6434daf
+      - type: file
+        url: https://apt.repos.intel.com/openvino/ubuntu22/pool/main/libopenvino-tensorflow-lite-frontend-2025.3.0_2025.3.0.19807_amd64.deb
+        sha256: 5eb88654519a6a4998142f36ada27c583a08e3d5565bf29409c87a583ffa0736
+
+  - name: atlabelmaster
+    buildsystem: cmake-ninja
+    builddir: true
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DLABELMASTER_APP_VERSION=1.2.2
+      - -DLABELMASTER_FLATPAK=ON
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - .flatpak-builder
+          - .git
+          - .idea
+          - .vscode
+          - bin
+          - build
+          - build_*
+          - dist
+          - labelmaster_*

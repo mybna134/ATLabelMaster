@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.mybna134.ATLabelMaster</id>
+  <name>ATLabelMaster</name>
+  <summary>Annotate RoboMaster armor plate datasets</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      ATLabelMaster is a pixel-art style image annotation tool for RoboMaster
+      armor plate datasets, with traditional and AI-assisted detection.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.mybna134.ATLabelMaster.desktop</launchable>
+  <url type="homepage">https://github.com/mybna134/ATLabelMaster</url>
+  <url type="bugtracker">https://github.com/mybna134/ATLabelMaster/issues</url>
+  <provides>
+    <binary>LabelMaster</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+</component>

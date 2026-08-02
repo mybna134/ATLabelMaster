@@ -61,6 +61,8 @@ public slots:
     void addDetection(const Armor& a);               // (新建之后调用)追加一个
     void updateDetection(int index, const Armor& a); // 更新一个
     void removeDetection(int index);                 // 删除一个
+    void undo();                                     // 撤销一次标注编辑
+    void redo();                                     // 重做一次标注编辑
 
     // 类别与选中
     void setCurrentClass(const QString& cls) { currentClass_ = cls; } // 新框默认
@@ -72,8 +74,7 @@ public slots:
     bool setSelectedIndex(int idx);            // -1 取消选中
     int selectedIndex() const { return selectedIndex_; }
     // 主标注窗口快捷键。返回 true 表示该按键已被识别并处理。
-    bool handleEditorShortcut(
-        int key, Qt::KeyboardModifiers modifiers = Qt::NoModifier);
+    bool handleEditorShortcut(int key, Qt::KeyboardModifiers modifiers = Qt::NoModifier);
     // 更新颜色和类型
     void ProcessInfoChanged(
         const QString& EditedClass, const QString& Color, const int& size, int vis0, int vis1,
@@ -98,6 +99,7 @@ signals:
     void detectionRemoved(int index);                            // 删除哪个
     void annotationsChanged(const QVector<Armor>& armors);       // 任意画布标注编辑
     void shortcutFeedback(const QString& message);
+    void historyAvailabilityChanged(bool canUndo, bool canRedo);
 
     // 批量发布（供外部保存）
     void annotationsPublished(const QVector<Armor>& armors, const QImage& image, bool needSaveImg);
@@ -124,12 +126,16 @@ private:
     bool pointInsidePolyW(const QPolygonF& polyW, const QPointF& w) const;
     int hitMaskStrict(const QPoint& wpos) const;       // 命中Mask区域
     bool selectDetectionInDirection(int key);
-    int visibilityPointForKey(int key) const;
+    int visibilityPointForKey(int key, Qt::KeyboardModifiers modifiers) const;
     bool handleVisibilityShortcut(int pointIndex);
     void commitPendingVisibilityToggle();
     void cancelPendingVisibilityShortcut();
     void setKeypointVisibility(
         int detectionIndex, int pointIndex, int visibility, const QString& action);
+    void replaceDetections(const QVector<Armor>& dets, bool resetHistory);
+    void resetAnnotationHistory();
+    void recordAnnotationHistory();
+    void restoreAnnotationHistory(int index);
     // 编辑颜色和类别
     void promptEditSelectedInfo(bool isCurrent = false);
     void updateFitRect();
@@ -210,9 +216,15 @@ private:
     QString currentColor_;
     std::array<int, 4> currentKeypointVisibility_{2, 2, 2, 2};
     QHash<int, QHash<int, QSvgRenderer*>> svgCache_;
-    QTimer* visibilityShortcutTimer_       = nullptr;
-    int pendingVisibilityDetectionIndex_   = -1;
-    int pendingVisibilityPointIndex_       = -1;
+    QTimer* visibilityShortcutTimer_     = nullptr;
+    int pendingVisibilityDetectionIndex_ = -1;
+    int pendingVisibilityPointIndex_     = -1;
+
+    QVector<QVector<Armor>> annotationHistory_;
+    int annotationHistoryIndex_                = -1;
+    bool restoringAnnotationHistory_           = false;
+    bool coalescingHistoryEdit_                = false;
+    static constexpr int kMaxAnnotationHistory = 100;
 
     // 参数
     const double kMinScale_  = 0.2;

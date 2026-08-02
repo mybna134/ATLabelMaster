@@ -80,6 +80,7 @@ protected:
 
 private:
     void setupActions();
+    void applyKeyboardShortcuts();
     void wireButtonsToActions();
     bool textInputHasFocus() const;
     void applyLabelTextToCanvas(bool showStatus);
@@ -88,12 +89,13 @@ private:
 
 private:
     std::unique_ptr<Ui::MainWindow> ui_;
-    bool logTimestamp_    = true;
-    bool dragDropEnabled_ = true;
+    bool logTimestamp_       = true;
+    bool dragDropEnabled_    = true;
     DataSet labelTextFormat_ = DataSet::LabelMasterV6;
     bool labelTextValid_     = true;
     QString labelTextError_;
-
+    QAction* undoAction_ = nullptr;
+    QAction* redoAction_ = nullptr;
 };
 
 } // namespace ui

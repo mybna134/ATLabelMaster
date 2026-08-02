@@ -1,22 +1,22 @@
 /**
  * @file keyboard_shortcuts.hpp
- * @brief Keyboard shortcut customization system
+ * @brief Central keyboard shortcut customization.
  */
 
-#ifndef LABELMASTER_KEYBOARD_SHORTCUTS_HPP
-#define LABELMASTER_KEYBOARD_SHORTCUTS_HPP
+#pragma once
 
+#include <QAction>
+#include <QHash>
+#include <QKeySequence>
+#include <QList>
 #include <QObject>
 #include <QString>
-#include <QKeySequence>
-#include <QHash>
-#include <QAction>
 
 namespace labelmaster::util {
 
-/**
- * @brief Default keyboard actions
- */
+// Keep every keyboard-driven command in this enum.  The settings dialog is
+// generated from allActions(), so adding a command here without exposing it in
+// the key-binding tab is deliberately difficult.
 enum class KeyboardAction {
     OpenFolder,
     Save,
@@ -27,65 +27,65 @@ enum class KeyboardAction {
     Delete,
     Settings,
     Statistics,
+    Filter,
+    Help,
+    About,
     Undo,
     Redo,
-    ZoomIn,
-    ZoomOut,
-    ZoomReset,
-    FitToWindow,
-    ToggleGrid,
-    PixelSnap
+
+    SelectUp,
+    SelectLeft,
+    SelectDown,
+    SelectRight,
+    EditSelected,
+
+    ColorRed,
+    ColorGray,
+    ColorBlue,
+    ColorPurple,
+    ClassSentry,
+    Class1,
+    Class2,
+    Class3,
+    Class4,
+    Class5,
+    ClassOutpost,
+    ClassBase,
+    SizeBig,
+    SizeSmall,
+
+    VisibilityTopLeft,
+    VisibilityTopRight,
+    VisibilityBottomLeft,
+    VisibilityBottomRight,
+    CancelCanvas,
 };
 
-/**
- * @brief Keyboard shortcut manager
- *
- * Manages customizable keyboard shortcuts.
- */
-class KeyboardManager : public QObject {
+class KeyboardManager final : public QObject {
     Q_OBJECT
 
 public:
     static KeyboardManager& instance();
 
-    /**
-     * @brief Get key sequence for an action
-     */
     QKeySequence shortcut(KeyboardAction action) const;
+    QKeySequence defaultShortcut(KeyboardAction action) const;
+    QHash<KeyboardAction, QKeySequence> shortcuts() const { return shortcuts_; }
 
-    /**
-     * @brief Set key sequence for an action
-     */
     void setShortcut(KeyboardAction action, const QKeySequence& sequence);
-
-    /**
-     * @brief Reset to default shortcuts
-     */
+    bool setShortcuts(
+        const QHash<KeyboardAction, QKeySequence>& shortcuts, QString* error = nullptr);
     void resetToDefaults();
 
-    /**
-     * @brief Apply shortcuts to actions
-     */
-    void applyToAction(QAction* action, KeyboardAction keyAction);
+    void applyToAction(QAction* action, KeyboardAction keyAction) const;
+    bool matches(
+        KeyboardAction action, int key, Qt::KeyboardModifiers modifiers = Qt::NoModifier) const;
+    static QString shortcutIdentity(const QKeySequence& sequence);
 
-    /**
-     * @brief Get display name for action
-     */
     QString actionName(KeyboardAction action) const;
-
-    /**
-     * @brief Get all actions
-     */
+    QString scopeName(KeyboardAction action) const;
     QList<KeyboardAction> allActions() const;
 
-    /**
-     * @brief Save shortcuts to settings
-     */
-    void save();
-
-    /**
-     * @brief Load shortcuts from settings
-     */
+    void save() const;
     void load();
 
 signals:
@@ -96,18 +96,15 @@ private:
     ~KeyboardManager() override = default;
 
     void initDefaults();
+    static QString actionId(KeyboardAction action);
+    bool validate(const QHash<KeyboardAction, QKeySequence>& shortcuts, QString* error = nullptr);
 
-private:
+    QHash<KeyboardAction, QKeySequence> defaults_;
     QHash<KeyboardAction, QKeySequence> shortcuts_;
 };
 
-/**
- * @brief Helper to get shortcut string
- */
 inline QString shortcutString(KeyboardAction action) {
-    return KeyboardManager::instance().shortcut(action).toString();
+    return KeyboardManager::instance().shortcut(action).toString(QKeySequence::NativeText);
 }
 
 } // namespace labelmaster::util
-
-#endif // LABELMASTER_KEYBOARD_SHORTCUTS_HPP
