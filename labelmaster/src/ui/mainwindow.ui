@@ -6,9 +6,15 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1840</width>
-    <height>1052</height>
+    <width>1280</width>
+    <height>800</height>
    </rect>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>200</width>
+    <height>200</height>
+   </size>
   </property>
   <property name="acceptDrops">
    <bool>true</bool>
@@ -20,26 +26,17 @@
    <bool>true</bool>
   </property>
   <widget class="QWidget" name="centralwidget">
-   <layout class="QHBoxLayout" name="horizontalLayout">
+   <layout class="QHBoxLayout" name="horizontalLayout" stretch="1,4,2">
+    <property name="sizeConstraint">
+     <enum>QLayout::SizeConstraint::SetNoConstraint</enum>
+    </property>
     <item>
      <widget class="QFrame" name="left_frame">
       <property name="sizePolicy">
-       <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
-        <horstretch>0</horstretch>
-        <verstretch>0</verstretch>
+       <sizepolicy hsizetype="Preferred" vsizetype="Expanding">
+        <horstretch>1</horstretch>
+        <verstretch>1</verstretch>
        </sizepolicy>
-      </property>
-      <property name="minimumSize">
-       <size>
-        <width>200</width>
-        <height>960</height>
-       </size>
-      </property>
-      <property name="maximumSize">
-       <size>
-        <width>240</width>
-        <height>960</height>
-       </size>
       </property>
       <property name="frameShape">
        <enum>QFrame::Shape::StyledPanel</enum>
@@ -192,16 +189,10 @@
     <item>
      <widget class="QFrame" name="center_frame">
       <property name="sizePolicy">
-       <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
-        <horstretch>0</horstretch>
-        <verstretch>0</verstretch>
+       <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+        <horstretch>4</horstretch>
+        <verstretch>1</verstretch>
        </sizepolicy>
-      </property>
-      <property name="minimumSize">
-       <size>
-        <width>1280</width>
-        <height>960</height>
-       </size>
       </property>
       <property name="frameShape">
        <enum>QFrame::Shape::StyledPanel</enum>
@@ -211,24 +202,17 @@
       </property>
       <layout class="QVBoxLayout" name="verticalLayout_2">
        <item>
-        <spacer name="spacer_lower">
-         <property name="orientation">
-          <enum>Qt::Orientation::Vertical</enum>
-         </property>
-         <property name="sizeHint" stdset="0">
-          <size>
-           <width>20</width>
-           <height>40</height>
-          </size>
-         </property>
-        </spacer>
-       </item>
-       <item>
         <widget class="ImageCanvas" name="label">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+           <horstretch>1</horstretch>
+           <verstretch>1</verstretch>
+          </sizepolicy>
+         </property>
          <property name="minimumSize">
           <size>
-           <width>1280</width>
-           <height>960</height>
+           <width>100</width>
+           <height>80</height>
           </size>
          </property>
          <property name="styleSheet">
@@ -239,24 +223,17 @@
          </property>
         </widget>
        </item>
-       <item>
-        <spacer name="spacer_upper">
-         <property name="orientation">
-          <enum>Qt::Orientation::Vertical</enum>
-         </property>
-         <property name="sizeHint" stdset="0">
-          <size>
-           <width>20</width>
-           <height>40</height>
-          </size>
-         </property>
-        </spacer>
-       </item>
       </layout>
      </widget>
     </item>
     <item>
      <widget class="QFrame" name="right_frame">
+      <property name="sizePolicy">
+       <sizepolicy hsizetype="Preferred" vsizetype="Expanding">
+        <horstretch>2</horstretch>
+        <verstretch>1</verstretch>
+       </sizepolicy>
+      </property>
       <property name="frameShape">
        <enum>QFrame::Shape::StyledPanel</enum>
       </property>
@@ -266,9 +243,15 @@
       <layout class="QVBoxLayout" name="verticalLayout_3">
        <item>
         <widget class="QTextEdit" name="log_text">
+         <property name="sizePolicy">
+          <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+           <horstretch>1</horstretch>
+           <verstretch>1</verstretch>
+          </sizepolicy>
+         </property>
          <property name="minimumSize">
           <size>
-           <width>300</width>
+           <width>0</width>
            <height>0</height>
           </size>
          </property>
@@ -301,7 +284,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1840</width>
+     <width>1280</width>
      <height>23</height>
     </rect>
    </property>
