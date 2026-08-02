@@ -368,6 +368,15 @@ jobs:
                 echo "Qt libraries must come from org.kde.Platform, not /app" >&2
                 exit 1
               fi
+              if find /app/lib64 -name "*.so*" -print -quit 2>/dev/null | grep -q .; then
+                echo "Shared libraries must be installed in /app/lib, not /app/lib64" >&2
+                exit 1
+              fi
+              if ldd /app/bin/LabelMaster | grep -q "not found"; then
+                echo "LabelMaster has unresolved runtime libraries" >&2
+                ldd /app/bin/LabelMaster >&2
+                exit 1
+              fi
               if ldd /app/bin/LabelMaster | grep -E "libQt6.*=> /app/"; then
                 echo "LabelMaster is linked to a bundled Qt library" >&2
                 exit 1
