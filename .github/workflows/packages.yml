@@ -361,7 +361,7 @@ jobs:
               "$build_dir" \
               "$manifest"
 
-            flatpak-builder --run "$build_dir" "$manifest" sh -eu -c '
+            flatpak build --runtime "$build_dir" sh -eu -c '
               test "$QT_QPA_PLATFORMTHEME" = kde
               test -f /usr/lib/plugins/platformthemes/KDEPlasmaPlatformTheme6.so
               if find /app -name "libQt6*.so*" -print -quit | grep -q .; then
